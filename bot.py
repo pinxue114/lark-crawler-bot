@@ -1,0 +1,370 @@
+import os
+import json
+import time
+from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+
+import lark_oapi as lark
+from lark_oapi.api.im.v1 import (
+    ReplyMessageRequest,
+    ReplyMessageRequestBody,
+    GetMessageResourceRequest,
+)
+from lark_oapi.api.drive.v1 import (
+    UploadAllFileRequest,
+    UploadAllFileRequestBody,
+    PatchPermissionPublicRequest,
+    PermissionPublicRequest,
+)
+from lark_oapi.api.bitable.v1 import (
+    CreateAppTableRecordRequest,
+    AppTableRecord
+)
+
+from crawler import extract_urls, fetch_page_metadata
+
+# Event deduplication: Lark may retry delivery if response is slow
+_processed_events = set()
+_bot_start_time = int(time.time())
+
+# Load environment variables
+load_dotenv()
+
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+ENCRYPT_KEY = os.getenv("ENCRYPT_KEY")
+VERIFICATION_TOKEN = os.getenv("VERIFICATION_TOKEN")
+
+BITABLE_APP_TOKEN = os.getenv("BITABLE_APP_TOKEN")
+BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID")
+DRIVE_FOLDER_TOKEN = os.getenv("DRIVE_FOLDER_TOKEN")
+PORT = int(os.getenv("PORT", 5000))
+
+# Initialize Lark Client
+client = lark.Client.builder() \
+    .app_id(APP_ID) \
+    .app_secret(APP_SECRET) \
+    .log_level(lark.LogLevel.DEBUG) \
+    .build()
+
+app = Flask(__name__)
+
+def build_card_message(metadata: dict) -> str:
+    """
+    Constructs a Lark interactive message card JSON.
+    """
+    card = {
+        "config": {
+            "wide_screen_mode": True
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "content": f"**Title:** {metadata.get('title')}",
+                    "tag": "lark_md"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "content": f"**Description:** {metadata.get('description')}",
+                    "tag": "lark_md"
+                }
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {
+                            "content": metadata.get('button_text', 'Visit Link'),
+                            "tag": "plain_text"
+                        },
+                        "url": metadata.get('url'),
+                        "type": "primary"
+                    }
+                ]
+            }
+        ],
+        "header": {
+            "template": "blue",
+            "title": {
+                "content": "Link Preview",
+                "tag": "plain_text"
+            }
+        }
+    }
+    return json.dumps(card)
+
+def save_to_bitable(metadata: dict, timestamp_ms: int, sender_open_id: str):
+    """
+    Saves the extracted URL metadata to Lark Bitable.
+    """
+    if not BITABLE_APP_TOKEN or not BITABLE_TABLE_ID:
+        print("Bitable credentials not configured. Skipping save.")
+        return
+
+    try:
+        # Assuming the base has 'Title', 'Description', and 'URL' fields
+        record = AppTableRecord.builder().fields({
+            "Title": metadata.get('title'),
+            "Description": metadata.get('description'),
+            "URL": {"text": metadata.get('url'), "link": metadata.get('url')},
+            "Timestamp": timestamp_ms,
+            "Sender": [{"id": sender_open_id}],
+        }).build()
+
+        req = CreateAppTableRecordRequest.builder() \
+            .app_token(BITABLE_APP_TOKEN) \
+            .table_id(BITABLE_TABLE_ID) \
+            .request_body(record) \
+            .build()
+            
+        resp = client.bitable.v1.app_table_record.create(req)
+        
+        if not resp.success():
+            print(f"Failed to add bitable record: {resp.code} {resp.msg} {resp.raw.content}")
+        else:
+            print(f"Successfully added record to Bitable! record_id: {resp.data.record.record_id}")
+    except Exception as e:
+        print(f"Exception saving to bitable: {e}")
+
+def download_message_resource(message_id: str, file_key: str, resource_type: str = "image") -> tuple:
+    """
+    Downloads an image or file from a Lark message.
+    Returns (file_obj, file_name).
+    """
+    req = GetMessageResourceRequest.builder() \
+        .message_id(message_id) \
+        .file_key(file_key) \
+        .type(resource_type) \
+        .build()
+
+    resp = client.im.v1.message_resource.get(req)
+    if not resp.success():
+        print(f"Failed to download {resource_type}: {resp.code} {resp.msg}")
+        return None, None
+
+    file_name = resp.file_name if hasattr(resp, 'file_name') and resp.file_name else f"{file_key}.png"
+    return resp.file, file_name
+
+
+def upload_to_drive(file_obj, file_name: str) -> str:
+    """
+    Uploads a file to Lark Drive and returns the file token.
+    """
+    if not DRIVE_FOLDER_TOKEN:
+        print("DRIVE_FOLDER_TOKEN not configured. Skipping upload.")
+        return None
+
+    import io
+    if isinstance(file_obj, bytes):
+        file_obj = io.BytesIO(file_obj)
+
+    # Compute file size, then reset stream position
+    file_size = file_obj.seek(0, 2)
+    file_obj.seek(0)
+
+    req = UploadAllFileRequest.builder() \
+        .request_body(
+            UploadAllFileRequestBody.builder()
+            .file_name(file_name)
+            .parent_type("explorer")
+            .parent_node(DRIVE_FOLDER_TOKEN)
+            .size(file_size)
+            .file(file_obj)
+            .build()
+        ).build()
+
+    resp = client.drive.v1.file.upload_all(req)
+    if not resp.success():
+        print(f"Failed to upload to drive: {resp.code} {resp.msg}")
+        return None
+
+    file_token = resp.data.file_token
+    print(f"Uploaded to drive, file_token: {file_token}")
+    return file_token
+
+
+def set_file_link_sharing(file_token: str):
+    """
+    Sets the file's link sharing permission so anyone in the org can view it.
+    """
+    try:
+        req = PatchPermissionPublicRequest.builder() \
+            .token(file_token) \
+            .type("file") \
+            .request_body(
+                PermissionPublicRequest.builder()
+                .link_share_entity("tenant_readable")
+                .build()
+            ).build()
+
+        resp = client.drive.v1.permission_public.patch(req)
+        if not resp.success():
+            print(f"Failed to set link sharing: {resp.code} {resp.msg}")
+        else:
+            print(f"Link sharing enabled for {file_token}")
+    except Exception as e:
+        print(f"Exception setting link sharing: {e}")
+
+
+# Define event handler
+def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
+    event_id = data.header.event_id
+    create_time = int(data.event.message.create_time) // 1000  # ms to seconds
+    print(f"Received message event: {event_id}, create_time: {create_time}")
+
+    # Skip events from before bot started (stale retries after restart)
+    if create_time < _bot_start_time:
+        print(f"Skipping stale event: {event_id} (created before bot start)")
+        return
+
+    # Deduplicate: skip if already processed
+    if event_id in _processed_events:
+        print(f"Skipping duplicate event: {event_id}")
+        return
+    _processed_events.add(event_id)
+
+    msg_type = data.event.message.message_type
+    message_id = data.event.message.message_id
+    timestamp_ms = int(data.event.message.create_time)
+    sender_open_id = data.event.sender.sender_id.open_id
+    content_str = data.event.message.content
+
+    if msg_type in ("image", "file"):
+        try:
+            content_json = json.loads(content_str)
+        except Exception:
+            print("Failed to parse image/file content")
+            return
+
+        if msg_type == "image":
+            file_key = content_json.get("image_key", "")
+        else:
+            file_key = content_json.get("file_key", "")
+            # Only process image files
+            fname = content_json.get("file_name", "").lower()
+            if not fname.split(".")[-1] in ("png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "heic"):
+                print(f"Skipping non-image file: {fname}")
+                return
+
+        if not file_key:
+            return
+
+        print(f"Processing {msg_type}: {file_key}")
+
+        # Download image/file from Lark
+        resource_type = "image" if msg_type == "image" else "file"
+        file_obj, file_name = download_message_resource(message_id, file_key, resource_type)
+        if file_obj is None:
+            return
+
+        # Use original file name from content if available (for file messages)
+        original_name = content_json.get("file_name", file_name)
+
+        # Upload to Drive
+        file_token = upload_to_drive(file_obj, original_name)
+        if file_token is None:
+            return
+
+        # Make file accessible via link sharing
+        set_file_link_sharing(file_token)
+
+        download_url = f"https://feishu.cn/file/{file_token}"
+
+        # Reply with confirmation card
+        card_content = build_card_message({
+            "title": "Image Saved",
+            "description": "Image has been saved to Drive.",
+            "url": download_url,
+            "button_text": "View Image",
+        })
+
+        reply_body = ReplyMessageRequestBody.builder() \
+            .content(card_content) \
+            .msg_type("interactive") \
+            .build()
+
+        reply_req = ReplyMessageRequest.builder() \
+            .message_id(message_id) \
+            .request_body(reply_body) \
+            .build()
+
+        resp = client.im.v1.message.reply(reply_req)
+        if not resp.success():
+            print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_request_id()}")
+
+        # Save to Bitable
+        save_to_bitable(
+            {"title": "圖片", "description": "", "url": download_url},
+            timestamp_ms, sender_open_id
+        )
+        return
+
+    if msg_type != "text":
+        return
+
+    try:
+        content_json = json.loads(content_str)
+        text = content_json.get("text", "")
+    except Exception:
+        text = content_str
+
+    urls = extract_urls(text)
+    if not urls:
+        return
+
+    for url in urls:
+        print(f"Processing URL: {url}")
+        metadata = fetch_page_metadata(url)
+
+        # 1. Reply to user with card
+        card_content = build_card_message(metadata)
+
+        reply_body = ReplyMessageRequestBody.builder() \
+            .content(card_content) \
+            .msg_type("interactive") \
+            .build()
+
+        reply_req = ReplyMessageRequest.builder() \
+            .message_id(message_id) \
+            .request_body(reply_body) \
+            .build()
+
+        resp = client.im.v1.message.reply(reply_req)
+        if not resp.success():
+            print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_request_id()}")
+
+        # 2. Save to Bitable
+        save_to_bitable(metadata, timestamp_ms, sender_open_id)
+        
+
+# Register handler
+event_handler = lark.EventDispatcherHandler.builder(ENCRYPT_KEY, VERIFICATION_TOKEN) \
+    .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1) \
+    .build()
+
+@app.route("/webhook/event", methods=["POST"])
+def lark_event():
+    # Construct lark request from flask request
+    lark_request = lark.BaseRequest.builder() \
+        .uri(request.url) \
+        .http_method(request.method) \
+        .headers(dict(request.headers)) \
+        .body(request.data) \
+        .build()
+
+    # Dispatch event
+    lark_response = event_handler.do(lark_request)
+
+    # Return flask response
+    return lark_response.content, lark_response.status_code, lark_response.headers.items()
+
+@app.route("/", methods=["GET"])
+def health_check():
+    return jsonify({"status": "healthy"})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT, debug=True)
