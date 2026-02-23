@@ -1,20 +1,25 @@
-# Lark URL Preview Bot
+[中文版](README_zh.md)
 
-A Lark Base (Bitable) integration bot that automatically extracts URLs from group messages, crawls the parsed link for Title and Description metadata, replies with a rich Interactive Card preview, and saves the data directly into a Bitable table.
+# Lark URL Preview & Image Archival Bot
+
+A Lark Base (Bitable) integration bot that listens for group messages via webhooks. For text messages, it extracts URLs, crawls metadata, and replies with interactive card previews. For image messages (inline or file attachments), it downloads the image, uploads it to Lark Drive, sets link sharing permissions, and replies with a confirmation card. All records are saved to a Bitable table.
 
 ## Features
 
-- URL Extraction from text messages in Lark Groups.
-- Webpage Crawling using `requests` and `beautifulsoup4` to fetch `<title>` and `<meta description>` / `<p>` tags.
-- Lark Interactive Message Cards to display the URL previews beautifully in chat.
-- Automatic Record Insertion into your designated Bitable Table.
+- **URL Preview**: Extracts URLs from text messages, crawls webpage metadata (`og:title`, `og:description`, `<title>`, `<meta description>`, `<p>`), and replies with a rich Interactive Card preview.
+- **Image Archival**: Downloads images sent in chat (both inline images and image file attachments), uploads them to a designated Lark Drive folder, enables link sharing, and replies with an "Image Saved" confirmation card.
+- **File Handling**: Processes file attachments with image extensions (png/jpg/jpeg/gif/bmp/webp/tiff/heic) using the same image archival flow; non-image files are skipped.
+- **Bitable Integration**: Automatically saves all records (URL previews and image uploads) into your designated Bitable table.
 
 ## Prerequisites
 
 1. A Lark Developer Account and an App created in the [Lark Developer Console](https://open.larksuite.com/).
 2. Enabled Permissions:
-   - `im:message` (Read and Send messages)
-   - `bitable:app` (Read and Edit Bitable apps)
+   - `im:message` — receive messages
+   - `im:resource` — download images/files from messages
+   - `drive:file:write` — upload files to Drive
+   - `drive:file:permission:write` — set file sharing permissions
+   - `bitable:app` — read and edit Bitable apps
 3. Event Subscriptions enabled:
    - Listen to the `im.message.receive_v1` event.
 4. Python 3.10+ installed.
@@ -36,19 +41,33 @@ A Lark Base (Bitable) integration bot that automatically extracts URLs from grou
    ```bash
    cp .env.example .env
    ```
-   *Required Variables:*
-   - `APP_ID`: App ID
-   - `APP_SECRET`: App Secret
-   - `ENCRYPT_KEY`: Event Subscription Encrypt Key
-   - `VERIFICATION_TOKEN`: Event Subscription Verification Token
-   - `BITABLE_APP_TOKEN`: Token of the Bitable document (URL part)
-   - `BITABLE_TABLE_ID`: Table ID inside the document.
+   **Required — Lark App Credentials**
+   *(Developer Console → your app → Credentials & Basic Info)*
+   - `APP_ID` — **App ID**, shown at the top of the Credentials & Basic Info page.
+   - `APP_SECRET` — **App Secret**, on the same page; click "Show" then copy.
+
+   **Required — Event Subscription Security**
+   *(Developer Console → your app → Event Subscriptions)*
+   - `ENCRYPT_KEY` — **Encrypt Key**, found in the *Encryption Strategy* section of the Event Subscriptions page.
+   - `VERIFICATION_TOKEN` — **Verification Token**, shown at the top of the same page.
+
+   **Optional — Bitable** *(only needed if you want to save records)*
+   - `BITABLE_APP_TOKEN` — Open your Bitable document in a browser; the token is the `{app_token}` part of the URL: `https://xxx.feishu.cn/base/{app_token}`.
+   - `BITABLE_TABLE_ID` — In the same URL, look for `?table={table_id}`; alternatively, right-click a table tab in the left sidebar → Copy Link to obtain it.
+
+   **Optional — Drive** *(only needed for image archival)*
+   - `DRIVE_FOLDER_TOKEN` — Open the target folder in Lark Drive; the token is the `{token}` part of the URL: `https://xxx.feishu.cn/drive/folder/{token}`.
+
+   **Optional — Server**
+   - `PORT` — Flask server port, defaults to `5000`. Usually no change needed.
 
 4. **Bitable Configuration**:
    Ensure your target Bitable has the following field names:
    - `Title` (Type: Text)
    - `Description` (Type: Text)
    - `URL` (Type: Link/URL or Text)
+   - `Timestamp` (Type: DateTime)
+   - `Sender` (Type: People)
 
 ## Running the Bot
 
