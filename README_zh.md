@@ -81,3 +81,18 @@ python bot.py
 ngrok http 5000
 ```
 然後將 `https://<your-ngrok-url>.ngrok-free.app/webhook/event` 網址填入 Lark 應用程式的事件訂閱設定中。
+
+## Docker 部署
+
+使用 Docker Compose 建置並啟動：
+```bash
+docker compose up -d
+```
+
+或手動建置並執行：
+```bash
+docker build -t lark-crawlerbot .
+docker run -d --env-file .env -p 5000:5000 lark-crawlerbot
+```
+
+容器使用 Gunicorn 作為生產級 WSGI 伺服器（2 個 worker、30 秒 timeout）。健康檢查端點為 `GET /`。

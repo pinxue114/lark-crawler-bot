@@ -3,3 +3,4 @@ lark-oapi>=1.2.10
 requests==2.31.0
 beautifulsoup4==4.12.3
 python-dotenv==1.0.1
+gunicorn==23.0.0

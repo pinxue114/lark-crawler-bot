@@ -81,3 +81,18 @@ python bot.py
 ngrok http 5000
 ```
 Then copy the `https://<your-ngrok-url>.ngrok-free.app/webhook/event` URL into your Lark App's Event Subscription settings.
+
+## Docker Deployment
+
+Build and run with Docker Compose:
+```bash
+docker compose up -d
+```
+
+Or build and run manually:
+```bash
+docker build -t lark-crawlerbot .
+docker run -d --env-file .env -p 5000:5000 lark-crawlerbot
+```
+
+The container uses Gunicorn as the production WSGI server (2 workers, 30s timeout). The health check endpoint is available at `GET /`.

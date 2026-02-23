@@ -1,6 +1,8 @@
 import os
 import json
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
@@ -25,6 +27,8 @@ from crawler import extract_urls, fetch_page_metadata
 
 # Event deduplication: Lark may retry delivery if response is slow
 _processed_events = set()
+_event_lock = threading.Lock()          # Atomic check-then-add for dedup
+_executor = ThreadPoolExecutor(max_workers=4)  # Background processing pool
 _bot_start_time = int(time.time())
 
 # Load environment variables
@@ -210,7 +214,7 @@ def set_file_link_sharing(file_token: str):
         print(f"Exception setting link sharing: {e}")
 
 
-# Define event handler
+# Define event handler — fast path (runs in webhook thread, must return quickly)
 def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     event_id = data.header.event_id
     create_time = int(data.event.message.create_time) // 1000  # ms to seconds
@@ -221,11 +225,12 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         print(f"Skipping stale event: {event_id} (created before bot start)")
         return
 
-    # Deduplicate: skip if already processed
-    if event_id in _processed_events:
-        print(f"Skipping duplicate event: {event_id}")
-        return
-    _processed_events.add(event_id)
+    # Atomic dedup: lock guarantees only one thread passes for a given event_id
+    with _event_lock:
+        if event_id in _processed_events:
+            print(f"Skipping duplicate event: {event_id}")
+            return
+        _processed_events.add(event_id)
 
     msg_type = data.event.message.message_type
     message_id = data.event.message.message_id
@@ -233,6 +238,7 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     sender_open_id = data.event.sender.sender_id.open_id
     content_str = data.event.message.content
 
+    # Lightweight pre-checks before submitting to background
     if msg_type in ("image", "file"):
         try:
             content_json = json.loads(content_str)
@@ -244,7 +250,6 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
             file_key = content_json.get("image_key", "")
         else:
             file_key = content_json.get("file_key", "")
-            # Only process image files
             fname = content_json.get("file_name", "").lower()
             if not fname.split(".")[-1] in ("png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "heic"):
                 print(f"Skipping non-image file: {fname}")
@@ -253,92 +258,112 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         if not file_key:
             return
 
-        print(f"Processing {msg_type}: {file_key}")
-
-        # Download image/file from Lark
-        resource_type = "image" if msg_type == "image" else "file"
-        file_obj, file_name = download_message_resource(message_id, file_key, resource_type)
-        if file_obj is None:
+    elif msg_type == "text":
+        try:
+            content_json = json.loads(content_str)
+            text = content_json.get("text", "")
+        except Exception:
+            text = content_str
+        if not extract_urls(text):
             return
 
-        # Use original file name from content if available (for file messages)
-        original_name = content_json.get("file_name", file_name)
-
-        # Upload to Drive
-        file_token = upload_to_drive(file_obj, original_name)
-        if file_token is None:
-            return
-
-        # Make file accessible via link sharing
-        set_file_link_sharing(file_token)
-
-        download_url = f"https://feishu.cn/file/{file_token}"
-
-        # Reply with confirmation card
-        card_content = build_card_message({
-            "title": "Image Saved",
-            "description": "Image has been saved to Drive.",
-            "url": download_url,
-            "button_text": "View Image",
-        })
-
-        reply_body = ReplyMessageRequestBody.builder() \
-            .content(card_content) \
-            .msg_type("interactive") \
-            .build()
-
-        reply_req = ReplyMessageRequest.builder() \
-            .message_id(message_id) \
-            .request_body(reply_body) \
-            .build()
-
-        resp = client.im.v1.message.reply(reply_req)
-        if not resp.success():
-            print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_request_id()}")
-
-        # Save to Bitable
-        save_to_bitable(
-            {"title": "圖片", "description": "", "url": download_url},
-            timestamp_ms, sender_open_id
-        )
+    else:
         return
 
-    if msg_type != "text":
-        return
+    # Submit heavy work to background thread — webhook returns immediately
+    _executor.submit(
+        _process_message, msg_type, message_id, timestamp_ms,
+        sender_open_id, content_str
+    )
 
+
+def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content_str):
+    """Slow path — runs in ThreadPoolExecutor, handles download/upload/reply/save."""
     try:
-        content_json = json.loads(content_str)
-        text = content_json.get("text", "")
-    except Exception:
-        text = content_str
+        if msg_type in ("image", "file"):
+            content_json = json.loads(content_str)
 
-    urls = extract_urls(text)
-    if not urls:
-        return
+            if msg_type == "image":
+                file_key = content_json.get("image_key", "")
+            else:
+                file_key = content_json.get("file_key", "")
 
-    for url in urls:
-        print(f"Processing URL: {url}")
-        metadata = fetch_page_metadata(url)
+            print(f"Processing {msg_type}: {file_key}")
 
-        # 1. Reply to user with card
-        card_content = build_card_message(metadata)
+            resource_type = "image" if msg_type == "image" else "file"
+            file_obj, file_name = download_message_resource(message_id, file_key, resource_type)
+            if file_obj is None:
+                return
 
-        reply_body = ReplyMessageRequestBody.builder() \
-            .content(card_content) \
-            .msg_type("interactive") \
-            .build()
+            original_name = content_json.get("file_name", file_name)
 
-        reply_req = ReplyMessageRequest.builder() \
-            .message_id(message_id) \
-            .request_body(reply_body) \
-            .build()
+            file_token = upload_to_drive(file_obj, original_name)
+            if file_token is None:
+                return
 
-        resp = client.im.v1.message.reply(reply_req)
-        if not resp.success():
-            print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_request_id()}")
+            set_file_link_sharing(file_token)
 
-        # 2. Save to Bitable
-        save_to_bitable(metadata, timestamp_ms, sender_open_id)
+            download_url = f"https://feishu.cn/file/{file_token}"
+
+            card_content = build_card_message({
+                "title": "Image Saved",
+                "description": "Image has been saved to Drive.",
+                "url": download_url,
+                "button_text": "View Image",
+            })
+
+            reply_body = ReplyMessageRequestBody.builder() \
+                .content(card_content) \
+                .msg_type("interactive") \
+                .build()
+
+            reply_req = ReplyMessageRequest.builder() \
+                .message_id(message_id) \
+                .request_body(reply_body) \
+                .build()
+
+            resp = client.im.v1.message.reply(reply_req)
+            if not resp.success():
+                print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
+
+            save_to_bitable(
+                {"title": "圖片", "description": "", "url": download_url},
+                timestamp_ms, sender_open_id
+            )
+            return
+
+        # Text message with URLs
+        try:
+            content_json = json.loads(content_str)
+            text = content_json.get("text", "")
+        except Exception:
+            text = content_str
+
+        urls = extract_urls(text)
+        for url in urls:
+            print(f"Processing URL: {url}")
+            metadata = fetch_page_metadata(url)
+
+            card_content = build_card_message(metadata)
+
+            reply_body = ReplyMessageRequestBody.builder() \
+                .content(card_content) \
+                .msg_type("interactive") \
+                .build()
+
+            reply_req = ReplyMessageRequest.builder() \
+                .message_id(message_id) \
+                .request_body(reply_body) \
+                .build()
+
+            resp = client.im.v1.message.reply(reply_req)
+            if not resp.success():
+                print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
+
+            save_to_bitable(metadata, timestamp_ms, sender_open_id)
+
+    except Exception as e:
+        print(f"Error processing message {message_id}: {e}")
         
 
 # Register handler
@@ -367,4 +392,4 @@ def health_check():
     return jsonify({"status": "healthy"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, debug=True)
+    app.run(host="0.0.0.0", port=PORT, debug=os.getenv("FLASK_DEBUG", "false").lower() == "true")
