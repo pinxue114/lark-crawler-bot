@@ -6,7 +6,7 @@
 
 ## 功能特色
 
-- **連結預覽**：從文字訊息中擷取網址，抓取網頁 metadata（`og:title`、`og:description`、`<title>`、`<meta description>`、`<p>`），以互動卡片回覆預覽結果。
+- **連結預覽**：從文字訊息中擷取網址，抓取網頁 metadata（`og:title`、`og:description`、`<title>`、`<meta description>`、`<p>`），以互動卡片回覆預覽結果。Facebook/Meta 網址透過 Microlink.io（免費方案：每日 250 次）抓取 metadata，自動偵測並過濾通用 boilerplate，若 API 失敗則 fallback 至 URL 結構解析。
 - **圖片存檔**：下載聊天中發送的圖片（行內圖片及圖片檔案附件），上傳至指定的雲端硬碟資料夾，啟用連結分享，並以「圖片已儲存」確認卡片回覆。
 - **檔案處理**：處理副檔名為圖片格式的檔案附件（png/jpg/jpeg/gif/bmp/webp/tiff/heic），流程與圖片存檔相同；非圖片檔案則略過。
 - **多維表格整合**：自動將所有紀錄（連結預覽及圖片上傳）寫入指定的多維表格。

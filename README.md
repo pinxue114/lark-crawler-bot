@@ -6,7 +6,7 @@ A Lark Base (Bitable) integration bot that listens for group messages via webhoo
 
 ## Features
 
-- **URL Preview**: Extracts URLs from text messages, crawls webpage metadata (`og:title`, `og:description`, `<title>`, `<meta description>`, `<p>`), and replies with a rich Interactive Card preview.
+- **URL Preview**: Extracts URLs from text messages, crawls webpage metadata (`og:title`, `og:description`, `<title>`, `<meta description>`, `<p>`), and replies with a rich Interactive Card preview. Facebook/Meta URLs are handled via Microlink.io (free tier: 250 req/day) with automatic boilerplate detection and URL-structure fallback.
 - **Image Archival**: Downloads images sent in chat (both inline images and image file attachments), uploads them to a designated Lark Drive folder, enables link sharing, and replies with an "Image Saved" confirmation card.
 - **File Handling**: Processes file attachments with image extensions (png/jpg/jpeg/gif/bmp/webp/tiff/heic) using the same image archival flow; non-image files are skipped.
 - **Bitable Integration**: Automatically saves all records (URL previews and image uploads) into your designated Bitable table.

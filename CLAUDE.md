@@ -36,7 +36,7 @@ Two-file codebase:
   - **File messages** (`msg_type == "file"`): same flow as image, but only processes image file extensions (png/jpg/jpeg/gif/bmp/webp/tiff/heic); non-image files are skipped.
   Health check at `GET /`.
 
-- **crawler.py** — Stateless URL utilities. `extract_urls(text)` uses regex to find URLs. `fetch_page_metadata(url)` does HTTP GET with BeautifulSoup parsing; prioritizes `og:title`/`og:description` over standard HTML tags, falls back to first `<p>` for description (truncated to 200 chars). 10-second timeout.
+- **crawler.py** — Stateless URL utilities. `extract_urls(text)` uses regex to find URLs. `fetch_page_metadata(url)` does HTTP GET with BeautifulSoup parsing; prioritizes `og:title`/`og:description` over standard HTML tags, falls back to first `<p>` for description (truncated to 200 chars). 10-second timeout. Facebook URLs are handled specially since direct crawling is blocked by Facebook — `_fetch_facebook_via_api()` tries [Microlink.io](https://microlink.io/) (free tier, no key needed; [rate limit](https://microlink.io/docs/api/basics/rate-limit): 250 req/day, 1 req/s) with `_is_generic_facebook_metadata()` filtering out boilerplate responses; if the API fails, falls back to `_parse_facebook_url()` which infers metadata from URL structure.
 
 ## Configuration
 

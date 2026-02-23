@@ -1,6 +1,7 @@
 import re
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse, unquote
 
 def extract_urls(text: str) -> list[str]:
     """
@@ -18,6 +19,116 @@ def extract_urls(text: str) -> list[str]:
     )
     return url_pattern.findall(text)
 
+def _is_facebook_url(url: str) -> bool:
+    """Check if the URL belongs to Facebook/Meta domains."""
+    try:
+        host = urlparse(url).hostname or ""
+        host = host.lower().removeprefix("www.")
+        return host in (
+            "facebook.com", "m.facebook.com", "web.facebook.com",
+            "fb.com", "fb.watch",
+        ) or host.endswith(".facebook.com")
+    except Exception:
+        return False
+
+
+def _humanize(slug: str) -> str:
+    """Turn a URL slug like 'john.doe' into 'John Doe'."""
+    slug = unquote(slug)
+    slug = re.sub(r'[._-]+', ' ', slug)
+    return slug.strip().title()
+
+
+_GENERIC_FB_TITLES = {
+    "facebook", "facebook - log in or sign up",
+    "log in to facebook", "facebook – log in or sign up",
+}
+
+
+def _is_generic_facebook_metadata(title: str, description: str) -> bool:
+    """Detect Facebook boilerplate metadata returned by various APIs."""
+    if not title:
+        return True
+    t = title.strip().lower()
+    if t in _GENERIC_FB_TITLES:
+        return True
+    if t.startswith("log in") or t.startswith("sign up"):
+        return True
+    generic_desc_prefixes = (
+        "connect with friends, family and other people you know",
+        "create an account or log into facebook",
+        "log into facebook to start sharing",
+    )
+    d = (description or "").strip().lower()
+    return any(d.startswith(gd) for gd in generic_desc_prefixes)
+
+
+def _fetch_facebook_via_microlink(url: str) -> dict | None:
+    """Free tier, no key needed. GET https://api.microlink.io?url=..."""
+    try:
+        resp = requests.get("https://api.microlink.io", params={"url": url}, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("status") != "success":
+            return None
+        data = payload.get("data") or {}
+        title = (data.get("title") or "").strip()
+        description = (data.get("description") or "").strip()
+        if _is_generic_facebook_metadata(title, description):
+            return None
+        return {"url": url, "title": title, "description": description or "No description available."}
+    except Exception as e:
+        print(f"Microlink API error for {url}: {e}")
+        return None
+
+
+def _fetch_facebook_via_api(url: str) -> dict | None:
+    """Try metadata APIs for Facebook URLs. Returns first meaningful result or None."""
+    return _fetch_facebook_via_microlink(url)
+
+
+def _parse_facebook_url(url: str) -> dict:
+    """Parse Facebook URL structure into descriptive metadata."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    path = unquote(parsed.path).strip("/")
+    segments = [s for s in path.split("/") if s]
+
+    title = "Facebook Link"
+    description = url
+
+    if host == "fb.watch":
+        title = "Facebook Video"
+    elif not segments:
+        title = "Facebook"
+    elif segments[0] == "groups" and len(segments) >= 2:
+        title = f"Facebook Group: {_humanize(segments[1])}"
+    elif segments[0] == "events" and len(segments) >= 2:
+        title = "Facebook Event"
+    elif segments[0] == "watch":
+        title = "Facebook Video"
+    elif segments[0] == "reel" or segments[0] == "reels":
+        title = "Facebook Reel"
+    elif segments[0] == "marketplace":
+        title = "Facebook Marketplace"
+    elif segments[0] == "share":
+        title = "Facebook Share Link"
+    elif segments[0] == "photo" or segments[0] == "photo.php":
+        title = "Facebook Photo"
+    elif segments[0] == "story.php":
+        title = "Facebook Story"
+    elif len(segments) >= 2 and segments[1] in ("posts", "activity"):
+        title = f"Post by {_humanize(segments[0])}"
+    elif len(segments) >= 2 and segments[1] == "videos":
+        title = f"Video by {_humanize(segments[0])}"
+    elif len(segments) >= 2 and segments[1] == "photos":
+        title = f"Photo by {_humanize(segments[0])}"
+    elif len(segments) == 1 and not segments[0].startswith("profile.php"):
+        title = f"Facebook: {_humanize(segments[0])}"
+
+    return {"url": url, "title": title, "description": description}
+
+
 def fetch_page_metadata(url: str) -> dict:
     """
     Fetches the URL and extracts its title and description using BeautifulSoup.
@@ -27,7 +138,14 @@ def fetch_page_metadata(url: str) -> dict:
         "title": "No Title",
         "description": "No description available."
     }
-    
+
+    # Facebook URLs: use API or URL structure parsing (direct crawl is blocked)
+    if _is_facebook_url(url):
+        api_result = _fetch_facebook_via_api(url)
+        if api_result is not None:
+            return api_result
+        return _parse_facebook_url(url)
+
     headers_list = [
         {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -97,4 +215,17 @@ if __name__ == "__main__":
     urls = extract_urls(sample_text)
     print(f"Found URLs: {urls}")
     for u in urls:
+        print(fetch_page_metadata(u))
+
+    # Facebook URL tests
+    print("\n--- Facebook URL parsing ---")
+    fb_urls = [
+        "https://www.facebook.com/zuck/posts/123",
+        "https://www.facebook.com/groups/pythonistas",
+        "https://www.facebook.com/share/p/1Aoy4RUHJG/",
+        "https://fb.watch/abc123/",
+        "https://www.facebook.com/events/456",
+        "https://m.facebook.com/story.php?id=789",
+    ]
+    for u in fb_urls:
         print(fetch_page_metadata(u))
