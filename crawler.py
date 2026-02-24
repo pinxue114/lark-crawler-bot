@@ -1,3 +1,4 @@
+import os
 import re
 import requests
 from bs4 import BeautifulSoup
@@ -42,6 +43,7 @@ def _humanize(slug: str) -> str:
 _GENERIC_FB_TITLES = {
     "facebook", "facebook - log in or sign up",
     "log in to facebook", "facebook – log in or sign up",
+    "log in or sign up to view",
 }
 
 
@@ -58,6 +60,7 @@ def _is_generic_facebook_metadata(title: str, description: str) -> bool:
         "connect with friends, family and other people you know",
         "create an account or log into facebook",
         "log into facebook to start sharing",
+        "see posts, photos and more on facebook",
     )
     d = (description or "").strip().lower()
     return any(d.startswith(gd) for gd in generic_desc_prefixes)
@@ -70,21 +73,78 @@ def _fetch_facebook_via_microlink(url: str) -> dict | None:
         resp.raise_for_status()
         payload = resp.json()
         if payload.get("status") != "success":
+            print(f"Microlink: non-success status for {url}: {payload.get('status')}")
             return None
         data = payload.get("data") or {}
         title = (data.get("title") or "").strip()
         description = (data.get("description") or "").strip()
         if _is_generic_facebook_metadata(title, description):
+            print(f"Microlink: generic metadata filtered for {url}: title={title!r}")
             return None
+        print(f"Microlink: got metadata for {url}: title={title!r}")
         return {"url": url, "title": title, "description": description or "No description available."}
     except Exception as e:
         print(f"Microlink API error for {url}: {e}")
         return None
 
 
+def _fetch_facebook_direct(url: str) -> dict | None:
+    """Direct crawl with facebookexternalhit UA — Facebook serves OG tags to this bot."""
+    try:
+        resp = requests.get(url, headers={"User-Agent": "facebookexternalhit/1.1"},
+                            timeout=10, allow_redirects=True)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        og_title = soup.find('meta', property='og:title')
+        og_desc = soup.find('meta', property='og:description')
+        title = (og_title.get('content') or "").strip() if og_title else ""
+        description = (og_desc.get('content') or "").strip() if og_desc else ""
+        if _is_generic_facebook_metadata(title, description):
+            print(f"Direct crawl: generic metadata filtered for {url}: title={title!r}")
+            return None
+        print(f"Direct crawl: got metadata for {url}: title={title!r}")
+        return {"url": url, "title": title or "No Title",
+                "description": description or "No description available."}
+    except Exception as e:
+        print(f"Direct crawl error for {url}: {e}")
+        return None
+
+
 def _fetch_facebook_via_api(url: str) -> dict | None:
     """Try metadata APIs for Facebook URLs. Returns first meaningful result or None."""
     return _fetch_facebook_via_microlink(url)
+
+
+
+def _fetch_facebook_via_proxy(url: str) -> dict | None:
+    """Fallback: fetch Facebook metadata via Cloudflare Worker proxy."""
+    proxy_url = os.getenv("FB_PROXY_URL")
+    if not proxy_url:
+        print("FB proxy: FB_PROXY_URL not set, skipping")
+        return None
+    try:
+        headers = {}
+        proxy_key = os.getenv("FB_PROXY_KEY")
+        if proxy_key:
+            headers["Authorization"] = f"Bearer {proxy_key}"
+        resp = requests.get(proxy_url, params={"url": url},
+                            headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        print(f"FB proxy response for {url}: {data}")
+        if "error" in data:
+            return None
+        title = (data.get("title") or "").strip()
+        description = (data.get("description") or "").strip()
+        if _is_generic_facebook_metadata(title, description):
+            print(f"FB proxy: generic metadata filtered for {url}: title={title!r}")
+            return None
+        print(f"FB proxy: got metadata for {url}: title={title!r}")
+        return {"url": url, "title": title or "No Title",
+                "description": description or "No description available."}
+    except Exception as e:
+        print(f"FB proxy error for {url}: {e}")
+        return None
 
 
 def _parse_facebook_url(url: str) -> dict:
@@ -139,11 +199,17 @@ def fetch_page_metadata(url: str) -> dict:
         "description": "No description available."
     }
 
-    # Facebook URLs: use API or URL structure parsing (direct crawl is blocked)
+    # Facebook URLs: try Microlink API → direct crawl → proxy → URL structure fallback
     if _is_facebook_url(url):
         api_result = _fetch_facebook_via_api(url)
         if api_result is not None:
             return api_result
+        direct_result = _fetch_facebook_direct(url)
+        if direct_result is not None:
+            return direct_result
+        proxy_result = _fetch_facebook_via_proxy(url)
+        if proxy_result is not None:
+            return proxy_result
         return _parse_facebook_url(url)
 
     headers_list = [

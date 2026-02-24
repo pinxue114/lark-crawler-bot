@@ -6,7 +6,7 @@ A Lark Base (Bitable) integration bot that listens for group messages via webhoo
 
 ## Features
 
-- **URL Preview**: Extracts URLs from text messages, crawls webpage metadata (`og:title`, `og:description`, `<title>`, `<meta description>`, `<p>`), and replies with a rich Interactive Card preview. Facebook/Meta URLs are handled via Microlink.io (free tier: 250 req/day) with automatic boilerplate detection and URL-structure fallback.
+- **URL Preview**: Extracts URLs from text messages, crawls webpage metadata (`og:title`, `og:description`, `<title>`, `<meta description>`, `<p>`), and replies with a rich Interactive Card preview. Facebook URLs are handled specially (see [Handling Facebook Links](#handling-facebook-links) below).
 - **Image Archival**: Downloads images sent in chat (both inline images and image file attachments), uploads them to a designated Lark Drive folder, enables link sharing, and replies with an "Image Saved" confirmation card.
 - **File Handling**: Processes file attachments with image extensions (png/jpg/jpeg/gif/bmp/webp/tiff/heic) using the same image archival flow; non-image files are skipped.
 - **Bitable Integration**: Automatically saves all records (URL previews and image uploads) into your designated Bitable table.
@@ -58,6 +58,10 @@ A Lark Base (Bitable) integration bot that listens for group messages via webhoo
    **Optional — Drive** *(only needed for image archival)*
    - `DRIVE_FOLDER_TOKEN` — Open the target folder in Lark Drive; the token is the `{token}` part of the URL: `https://xxx.feishu.cn/drive/folder/{token}`.
 
+   **Optional — Facebook Proxy** *(improves Facebook URL metadata on cloud servers)*
+   - `FB_PROXY_URL` — Cloudflare Worker proxy URL. Deploy `cf-worker/` first, then paste the Worker URL here (e.g. `https://fb-meta-proxy.<subdomain>.workers.dev`).
+   - `FB_PROXY_KEY` — API key for the proxy. Must match the Worker's `API_KEY` secret; leave empty if no key is configured.
+
    **Optional — Server**
    - `PORT` — Flask server port, defaults to `5000`. Usually no change needed.
 
@@ -96,3 +100,67 @@ docker run -d --env-file .env -p 5000:5000 lark-crawlerbot
 ```
 
 The container uses Gunicorn as the production WSGI server (2 workers, 30s timeout). The health check endpoint is available at `GET /`.
+
+## Handling Facebook Links
+
+Facebook blocks most servers from reading page titles and descriptions. When you share a Facebook link, a normal server just sees a login page instead of the actual content. The bot works around this by trying four methods in order, stopping as soon as one succeeds:
+
+```
+Facebook URL detected
+        |
+        v
+  1. Microlink.io API ---- free third-party service (no setup needed)
+        |
+      failed?
+        v
+  2. Direct crawl -------- bot pretends to be Facebook's own crawler
+        |
+      failed?
+        v
+  3. Cloudflare Worker --- proxy on Cloudflare's network (optional setup)
+        |
+      failed?
+        v
+  4. URL parsing --------- extracts name from the URL itself
+                            e.g. facebook.com/TeslaInsider → "TeslaInsider"
+```
+
+At each step, the bot checks whether Facebook returned real content or just a generic login page. If the result looks like boilerplate, it moves on to the next method.
+
+| Method | How it works | Setup needed | Limitations |
+|--------|-------------|-------------|-------------|
+| Microlink.io | Third-party API fetches the page for us | None (free tier) | 250 requests/day, 1 req/s |
+| Direct crawl | Requests the page using Facebook's own crawler identity | None | Often blocked on cloud servers |
+| Cloudflare Worker | A small proxy on Cloudflare's network, whose IPs Facebook does not block | Deploy `cf-worker/` (see below) | 100k requests/day (free tier) |
+| URL parsing | Reads the page name directly from the URL structure | None | No description, only a basic title |
+
+> **For most users**: The bot works out of the box (methods 1, 2, and 4 require no setup). Deploy the Cloudflare Worker (method 3) only if Facebook previews are frequently missing on your server.
+
+### Deploy the Cloudflare Worker (Optional)
+
+```bash
+# 1. Install dependencies
+cd cf-worker && npm install
+
+# 2. Log in to Cloudflare (opens browser on first use)
+npx wrangler login
+
+# 3. Local dev test
+npx wrangler dev
+# Test: curl 'http://localhost:8787/?url=https://www.facebook.com/share/p/1DWWsctUwX/'
+
+# 4. Deploy to Cloudflare edge network
+npx wrangler deploy
+# Output: Published fb-meta-proxy (https://fb-meta-proxy.<your-subdomain>.workers.dev)
+
+# 5. (Optional) Set an API key for protection
+npx wrangler secret put API_KEY
+```
+
+Then add to your `.env`:
+```
+FB_PROXY_URL=https://fb-meta-proxy.<your-subdomain>.workers.dev
+FB_PROXY_KEY=your_secret_key
+```
+
+**Cloudflare Workers free tier**: 100,000 requests/day, 10ms CPU per invocation, no credit card required.

@@ -6,7 +6,7 @@
 
 ## 功能特色
 
-- **連結預覽**：從文字訊息中擷取網址，抓取網頁 metadata（`og:title`、`og:description`、`<title>`、`<meta description>`、`<p>`），以互動卡片回覆預覽結果。Facebook/Meta 網址透過 Microlink.io（免費方案：每日 250 次）抓取 metadata，自動偵測並過濾通用 boilerplate，若 API 失敗則 fallback 至 URL 結構解析。
+- **連結預覽**：從文字訊息中擷取網址，抓取網頁 metadata（`og:title`、`og:description`、`<title>`、`<meta description>`、`<p>`），以互動卡片回覆預覽結果。Facebook 網址有特殊處理（詳見下方[處理 Facebook 連結](#處理-facebook-連結)）。
 - **圖片存檔**：下載聊天中發送的圖片（行內圖片及圖片檔案附件），上傳至指定的雲端硬碟資料夾，啟用連結分享，並以「圖片已儲存」確認卡片回覆。
 - **檔案處理**：處理副檔名為圖片格式的檔案附件（png/jpg/jpeg/gif/bmp/webp/tiff/heic），流程與圖片存檔相同；非圖片檔案則略過。
 - **多維表格整合**：自動將所有紀錄（連結預覽及圖片上傳）寫入指定的多維表格。
@@ -58,6 +58,10 @@
    **選填 — 雲端硬碟** *（需要圖片存檔功能時才設定）*
    - `DRIVE_FOLDER_TOKEN` — 在雲端硬碟中開啟目標資料夾，從網址列取得 `{token}` 部分：`https://xxx.feishu.cn/drive/folder/{token}`。
 
+   **選填 — Facebook Proxy** *（改善雲端伺服器上的 Facebook 網址 metadata 抓取）*
+   - `FB_PROXY_URL` — Cloudflare Worker proxy 網址。先部署 `cf-worker/`，再將 Worker 網址填入此處（例如 `https://fb-meta-proxy.<subdomain>.workers.dev`）。
+   - `FB_PROXY_KEY` — proxy 的 API key，須與 Worker 端設定的 `API_KEY` 一致；若未設定 key 則留空。
+
    **選填 — 伺服器**
    - `PORT` — Flask 伺服器端口，預設 `5000`，通常不需修改。
 
@@ -96,3 +100,67 @@ docker run -d --env-file .env -p 5000:5000 lark-crawlerbot
 ```
 
 容器使用 Gunicorn 作為生產級 WSGI 伺服器（2 個 worker、30 秒 timeout）。健康檢查端點為 `GET /`。
+
+## 處理 Facebook 連結
+
+Facebook 會封鎖大部分伺服器讀取頁面標題和描述。當你分享 Facebook 連結時，一般伺服器只會看到登入頁面，而非實際內容。Bot 透過依序嘗試四種方法來解決此問題，只要任一方法成功即停止：
+
+```
+偵測到 Facebook 網址
+        |
+        v
+  1. Microlink.io API ---- 免費第三方服務（無需設定）
+        |
+      失敗？
+        v
+  2. 直接爬取 ------------- bot 偽裝為 Facebook 自身的爬蟲
+        |
+      失敗？
+        v
+  3. Cloudflare Worker --- 透過 Cloudflare 網路的 proxy（需選配部署）
+        |
+      失敗？
+        v
+  4. URL 解析 ------------- 從網址本身擷取名稱
+                            例如 facebook.com/TeslaInsider → "TeslaInsider"
+```
+
+每一步 bot 都會檢查 Facebook 回傳的是真實內容還是通用的登入頁面。若結果看起來是制式內容，就會繼續嘗試下一個方法。
+
+| 方法 | 運作方式 | 需要設定 | 限制 |
+|------|---------|---------|------|
+| Microlink.io | 第三方 API 代為抓取頁面 | 無（免費方案） | 每日 250 次、每秒 1 次 |
+| 直接爬取 | 使用 Facebook 自身爬蟲的身份請求頁面 | 無 | 在雲端伺服器上經常被封鎖 |
+| Cloudflare Worker | 部署在 Cloudflare 網路上的小型 proxy，其 IP 不被 Facebook 封鎖 | 部署 `cf-worker/`（見下方） | 每日 10 萬次（免費方案） |
+| URL 解析 | 直接從網址結構讀取頁面名稱 | 無 | 無描述，僅能取得基本標題 |
+
+> **一般使用者提示**：Bot 開箱即用（方法 1、2、4 無需任何設定）。僅當你的伺服器上 Facebook 預覽經常缺失時，才需要部署 Cloudflare Worker（方法 3）。
+
+### 部署 Cloudflare Worker（選配）
+
+```bash
+# 1. 安裝相依套件
+cd cf-worker && npm install
+
+# 2. 登入 Cloudflare（首次使用會開啟瀏覽器授權）
+npx wrangler login
+
+# 3. 本地開發測試
+npx wrangler dev
+# 測試：curl 'http://localhost:8787/?url=https://www.facebook.com/share/p/1DWWsctUwX/'
+
+# 4. 部署至 Cloudflare 邊緣網路
+npx wrangler deploy
+# 輸出範例：Published fb-meta-proxy (https://fb-meta-proxy.<your-subdomain>.workers.dev)
+
+# 5.（選填）設定 API key 保護
+npx wrangler secret put API_KEY
+```
+
+然後在 `.env` 加入：
+```
+FB_PROXY_URL=https://fb-meta-proxy.<your-subdomain>.workers.dev
+FB_PROXY_KEY=your_secret_key
+```
+
+**Cloudflare Workers 免費方案額度**：每日 100,000 次請求、每次 10ms CPU、無需綁定信用卡。

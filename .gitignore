@@ -1,3 +1,5 @@
 .env
 __pycache__/
 *.pyc
+cf-worker/node_modules/
+cf-worker/.wrangler/

@@ -36,7 +36,9 @@ Two-file codebase:
   - **File messages** (`msg_type == "file"`): same flow as image, but only processes image file extensions (png/jpg/jpeg/gif/bmp/webp/tiff/heic); non-image files are skipped.
   Health check at `GET /`.
 
-- **crawler.py** — Stateless URL utilities. `extract_urls(text)` uses regex to find URLs. `fetch_page_metadata(url)` does HTTP GET with BeautifulSoup parsing; prioritizes `og:title`/`og:description` over standard HTML tags, falls back to first `<p>` for description (truncated to 200 chars). 10-second timeout. Facebook URLs are handled specially since direct crawling is blocked by Facebook — `_fetch_facebook_via_api()` tries [Microlink.io](https://microlink.io/) (free tier, no key needed; [rate limit](https://microlink.io/docs/api/basics/rate-limit): 250 req/day, 1 req/s) with `_is_generic_facebook_metadata()` filtering out boilerplate responses; if the API fails, falls back to `_parse_facebook_url()` which infers metadata from URL structure.
+- **crawler.py** — Stateless URL utilities. `extract_urls(text)` uses regex to find URLs. `fetch_page_metadata(url)` does HTTP GET with BeautifulSoup parsing; prioritizes `og:title`/`og:description` over standard HTML tags, falls back to first `<p>` for description (truncated to 200 chars). 10-second timeout. Facebook URLs are handled specially since direct crawling is blocked by Facebook — four-stage fallback: (1) `_fetch_facebook_via_api()` tries [Microlink.io](https://microlink.io/) (free tier, no key needed; [rate limit](https://microlink.io/docs/api/basics/rate-limit): 250 req/day, 1 req/s); (2) `_fetch_facebook_direct()` direct crawl with `facebookexternalhit` UA; (3) `_fetch_facebook_via_proxy()` calls Cloudflare Worker proxy (see `cf-worker/`); (4) `_parse_facebook_url()` infers metadata from URL structure. All results filtered by `_is_generic_facebook_metadata()`.
+
+- **cf-worker/** — Cloudflare Worker that proxies Facebook OG tag fetching. Cloudflare edge IPs are not blocked by Facebook (unlike typical cloud IPs). The Worker fetches Facebook pages with `facebookexternalhit/1.1` UA, extracts `og:title`/`og:description` via regex, and returns JSON. Optional API key auth. Domain-whitelisted to Facebook only.
 
 ## Configuration
 
@@ -45,6 +47,8 @@ All config via `.env` file (see `.env.example`). Key variables:
 - `ENCRYPT_KEY`, `VERIFICATION_TOKEN` — Lark event subscription security
 - `BITABLE_APP_TOKEN`, `BITABLE_TABLE_ID` — target Bitable table (optional; bot works without them but skips saving)
 - `DRIVE_FOLDER_TOKEN` — Lark Drive folder token for image uploads (required for image handling; obtain from folder URL `https://xxx.feishu.cn/drive/folder/{token}`)
+- `FB_PROXY_URL` — Cloudflare Worker proxy URL for Facebook metadata (optional; if unset, proxy step is skipped)
+- `FB_PROXY_KEY` — API key for the proxy (optional; must match the Worker's `API_KEY` secret if set)
 - `PORT` — server port (default 5000)
 
 ## Lark SDK Patterns
