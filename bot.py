@@ -1,8 +1,12 @@
+import io
 import os
 import json
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
+
+import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
@@ -162,7 +166,6 @@ def upload_to_drive(file_obj, file_name: str) -> str:
         print("DRIVE_FOLDER_TOKEN not configured. Skipping upload.")
         return None
 
-    import io
     if isinstance(file_obj, bytes):
         file_obj = io.BytesIO(file_obj)
 
@@ -189,6 +192,35 @@ def upload_to_drive(file_obj, file_name: str) -> str:
     file_token = resp.data.file_token
     print(f"Uploaded to drive, file_token: {file_token}")
     return file_token
+
+
+def download_image_from_url(url: str) -> tuple:
+    """Download image from external URL. Returns (BytesIO, filename)."""
+    try:
+        resp = requests.get(url, timeout=15, headers={
+            "User-Agent": "facebookexternalhit/1.1"
+        })
+        resp.raise_for_status()
+
+        # Try to get filename from URL path
+        path = urlparse(url).path
+        basename = os.path.basename(path)
+        if basename and "." in basename:
+            filename = basename
+        else:
+            # Fallback: infer extension from Content-Type
+            ct = resp.headers.get("Content-Type", "")
+            ext_map = {
+                "image/jpeg": ".jpg", "image/png": ".png",
+                "image/gif": ".gif", "image/webp": ".webp",
+            }
+            ext = ext_map.get(ct.split(";")[0].strip(), ".jpg")
+            filename = f"fb_image{ext}"
+
+        return io.BytesIO(resp.content), filename
+    except Exception as e:
+        print(f"Failed to download image from {url}: {e}")
+        return None, None
 
 
 def set_file_link_sharing(file_token: str):
@@ -343,7 +375,63 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
         for url in urls:
             print(f"Processing URL: {url}")
             metadata = fetch_page_metadata(url)
+            image_url = metadata.get("image_url")
 
+            if image_url:
+                # Facebook photo: download → upload to Drive → reply card
+                file_obj, file_name = download_image_from_url(image_url)
+                if file_obj:
+                    file_token = upload_to_drive(file_obj, file_name)
+                    if file_token:
+                        set_file_link_sharing(file_token)
+                        download_url = f"https://feishu.cn/file/{file_token}"
+                        card_content = build_card_message({
+                            "title": metadata.get("title", "Image Saved"),
+                            "description": metadata.get("description", ""),
+                            "url": download_url,
+                            "button_text": "View Image",
+                        })
+
+                        reply_body = ReplyMessageRequestBody.builder() \
+                            .content(card_content) \
+                            .msg_type("interactive") \
+                            .build()
+                        reply_req = ReplyMessageRequest.builder() \
+                            .message_id(message_id) \
+                            .request_body(reply_body) \
+                            .build()
+                        resp = client.im.v1.message.reply(reply_req)
+                        if not resp.success():
+                            print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
+
+                        save_to_bitable(
+                            {"title": metadata.get("title", "圖片"), "description": metadata.get("description", ""), "url": download_url},
+                            timestamp_ms, sender_open_id
+                        )
+                        continue
+
+                # Download or upload failed — reply with error card
+                card_content = build_card_message({
+                    "title": "圖片下載失敗",
+                    "description": f"無法從 Facebook 下載圖片：{metadata.get('title', '')}",
+                    "url": url,
+                    "button_text": "Open Link",
+                })
+
+                reply_body = ReplyMessageRequestBody.builder() \
+                    .content(card_content) \
+                    .msg_type("interactive") \
+                    .build()
+                reply_req = ReplyMessageRequest.builder() \
+                    .message_id(message_id) \
+                    .request_body(reply_body) \
+                    .build()
+                resp = client.im.v1.message.reply(reply_req)
+                if not resp.success():
+                    print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
+                continue
+
+            # Normal Link Preview (original logic)
             card_content = build_card_message(metadata)
 
             reply_body = ReplyMessageRequestBody.builder() \

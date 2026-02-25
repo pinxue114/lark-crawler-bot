@@ -81,17 +81,26 @@ def _fetch_facebook_via_microlink(url: str) -> dict | None:
         if _is_generic_facebook_metadata(title, description):
             print(f"Microlink: generic metadata filtered for {url}: title={title!r}")
             return None
+        image_url = ""
+        img = data.get("image")
+        if isinstance(img, dict):
+            image_url = (img.get("url") or "").strip()
+        elif isinstance(img, str):
+            image_url = img.strip()
         print(f"Microlink: got metadata for {url}: title={title!r}")
-        return {"url": url, "title": title, "description": description or "No description available."}
+        result = {"url": url, "title": title, "description": description or "No description available."}
+        if image_url:
+            result["image_url"] = image_url
+        return result
     except Exception as e:
         print(f"Microlink API error for {url}: {e}")
         return None
 
 
 def _fetch_facebook_direct(url: str) -> dict | None:
-    """Direct crawl with facebookexternalhit UA — Facebook serves OG tags to this bot."""
+    """Direct crawl with Twitterbot UA — Facebook serves full OG tags (incl. og:image) to social crawlers."""
     try:
-        resp = requests.get(url, headers={"User-Agent": "facebookexternalhit/1.1"},
+        resp = requests.get(url, headers={"User-Agent": "Twitterbot/1.0"},
                             timeout=10, allow_redirects=True)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -102,9 +111,14 @@ def _fetch_facebook_direct(url: str) -> dict | None:
         if _is_generic_facebook_metadata(title, description):
             print(f"Direct crawl: generic metadata filtered for {url}: title={title!r}")
             return None
+        og_image = soup.find('meta', property='og:image')
+        image_url = (og_image.get('content') or "").strip() if og_image else ""
         print(f"Direct crawl: got metadata for {url}: title={title!r}")
-        return {"url": url, "title": title or "No Title",
+        result = {"url": url, "title": title or "No Title",
                 "description": description or "No description available."}
+        if image_url:
+            result["image_url"] = image_url
+        return result
     except Exception as e:
         print(f"Direct crawl error for {url}: {e}")
         return None
@@ -136,12 +150,36 @@ def _fetch_facebook_via_proxy(url: str) -> dict | None:
             return None
         title = (data.get("title") or "").strip()
         description = (data.get("description") or "").strip()
+        image_url = (data.get("image") or "").strip()
+
+        # For photo URLs: proxy may return image-only (no title/description)
+        # via the lookaside crawler media endpoint. Use proxy image endpoint
+        # so the bot can download without needing special UA.
         if _is_generic_facebook_metadata(title, description):
+            if image_url:
+                # Extract media_id from lookaside URL or fbid from original URL
+                from urllib.parse import parse_qs
+                media_id = parse_qs(urlparse(image_url).query).get("media_id", [None])[0]
+                if not media_id:
+                    media_id = parse_qs(urlparse(url).query).get("fbid", [None])[0]
+                if media_id:
+                    proxy_image_url = f"{proxy_url.rstrip('/')}?image_fbid={media_id}"
+                    print(f"FB proxy: photo image found, fbid={media_id}")
+                    return {
+                        "url": url,
+                        "title": "Facebook Photo",
+                        "description": url,
+                        "image_url": proxy_image_url,
+                    }
             print(f"FB proxy: generic metadata filtered for {url}: title={title!r}")
             return None
+
         print(f"FB proxy: got metadata for {url}: title={title!r}")
-        return {"url": url, "title": title or "No Title",
+        result = {"url": url, "title": title or "No Title",
                 "description": description or "No description available."}
+        if image_url:
+            result["image_url"] = image_url
+        return result
     except Exception as e:
         print(f"FB proxy error for {url}: {e}")
         return None
@@ -203,14 +241,30 @@ def fetch_page_metadata(url: str) -> dict:
     if _is_facebook_url(url):
         api_result = _fetch_facebook_via_api(url)
         if api_result is not None:
-            return api_result
-        direct_result = _fetch_facebook_direct(url)
-        if direct_result is not None:
-            return direct_result
-        proxy_result = _fetch_facebook_via_proxy(url)
-        if proxy_result is not None:
-            return proxy_result
-        return _parse_facebook_url(url)
+            result = api_result
+        else:
+            direct_result = _fetch_facebook_direct(url)
+            if direct_result is not None:
+                result = direct_result
+            else:
+                proxy_result = _fetch_facebook_via_proxy(url)
+                if proxy_result is not None:
+                    result = proxy_result
+                else:
+                    result = _parse_facebook_url(url)
+
+        # Only keep image_url for photo URLs
+        if "image_url" in result:
+            path = urlparse(url).path.lower().strip("/")
+            segments = [s for s in path.split("/") if s]
+            is_photo = (
+                (len(segments) >= 1 and segments[0] in ("photo", "photo.php"))
+                or (len(segments) >= 2 and segments[1] == "photos")
+            )
+            if not is_photo:
+                del result["image_url"]
+
+        return result
 
     headers_list = [
         {
@@ -234,6 +288,7 @@ def fetch_page_metadata(url: str) -> dict:
             session = requests.Session()
             session.headers.update(headers)
             response = session.get(url, timeout=10, allow_redirects=True)
+            response.encoding = response.apparent_encoding
             response.raise_for_status()
 
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -272,6 +327,23 @@ def fetch_page_metadata(url: str) -> dict:
     # Only set error description if no attempt succeeded at all
     if last_error and metadata['title'] == "No Title" and metadata['description'] == "No description available.":
         metadata['description'] = f"Failed to fetch preview: {last_error}"
+
+    # Last resort: try Microlink.io for pages blocked by bot protection (e.g. Cloudflare)
+    if metadata['title'] == "No Title" and metadata['description'].startswith("Failed to fetch"):
+        try:
+            resp = requests.get("https://api.microlink.io", params={"url": url}, timeout=15)
+            resp.raise_for_status()
+            payload = resp.json()
+            if payload.get("status") == "success":
+                data = payload.get("data") or {}
+                title = (data.get("title") or "").strip()
+                description = (data.get("description") or "").strip()
+                if title:
+                    metadata['title'] = title
+                if description:
+                    metadata['description'] = description
+        except Exception as e:
+            print(f"Microlink fallback error for {url}: {e}")
 
     return metadata
 

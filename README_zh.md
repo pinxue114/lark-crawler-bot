@@ -136,6 +136,16 @@ Facebook 會封鎖大部分伺服器讀取頁面標題和描述。當你分享 F
 
 > **一般使用者提示**：Bot 開箱即用（方法 1、2、4 無需任何設定）。僅當你的伺服器上 Facebook 預覽經常缺失時，才需要部署 Cloudflare Worker（方法 3）。
 
+### Facebook 照片網址
+
+Facebook 照片連結（`/photo/?fbid=XXX`）有特殊處理。由於 Facebook 封鎖大多數伺服器直接存取照片圖檔，Bot 會透過 Cloudflare Worker 的 lookaside 備援機制：
+
+1. **Worker 偵測照片網址** — 從網址擷取 `fbid`，透過 Facebook 的 `lookaside.fbsbx.com/lookaside/crawler/media/?media_id={fbid}` endpoint 取得圖片。
+2. **Worker 圖片代理** — Worker 上的 `?image_fbid={fbid}` endpoint 會將 lookaside 圖片以二進位格式代理回傳，讓 Bot 無需特殊 User-Agent 即可下載。
+3. **Bot 下載並儲存** — 當 crawler.py 回傳照片網址的 `image_url` 時，Bot 會透過 Worker 代理下載圖片、上傳至雲端硬碟，並以「View Image」卡片回覆。
+
+> **注意**：此功能需要部署 Cloudflare Worker（須設定 `FB_PROXY_URL`）。若未部署，照片網址僅會從 URL 結構擷取基本標題。
+
 ### 部署 Cloudflare Worker（選配）
 
 ```bash

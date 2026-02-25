@@ -12,6 +12,54 @@ function isFacebookUrl(url) {
   }
 }
 
+function extractFbidFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    // /photo/?fbid=123 or /photo.php?fbid=123
+    const fbid = parsed.searchParams.get('fbid');
+    if (fbid && /^\d+$/.test(fbid)) return fbid;
+    // /photo/123 (path-based)
+    const m = parsed.pathname.match(/\/photo\/(\d+)/);
+    if (m) return m[1];
+  } catch {}
+  return null;
+}
+
+function buildLookasideUrl(fbid) {
+  return `https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id=${fbid}`;
+}
+
+async function fetchLookasideImage(fbid, debug, debugLog) {
+  const url = buildLookasideUrl(fbid);
+  try {
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Twitterbot/1.0' },
+      redirect: 'follow',
+    });
+    const contentType = resp.headers.get('Content-Type') || '';
+    const isImage = contentType.startsWith('image/');
+
+    if (debug) {
+      debugLog.push({
+        step: 'lookaside',
+        url,
+        status: resp.status,
+        contentType,
+        isImage,
+      });
+    }
+
+    if (resp.ok && isImage) {
+      return { success: true, url, contentType };
+    }
+  } catch (err) {
+    if (debug) {
+      debugLog.push({ step: 'lookaside', url, error: err.message });
+    }
+  }
+  return { success: false };
+}
+
 function decodeEntities(str) {
   return str
     .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
@@ -90,7 +138,7 @@ function toMobileUrl(url) {
 
 async function fetchAndExtract(url, debug, debugLog, stepLabel) {
   const resp = await fetch(url, {
-    headers: { 'User-Agent': 'facebookexternalhit/1.1' },
+    headers: { 'User-Agent': 'Twitterbot/1.0' },
     redirect: 'follow',
   });
 
@@ -101,6 +149,7 @@ async function fetchAndExtract(url, debug, debugLog, stepLabel) {
   const html = await resp.text();
   const title = extractOgTag(html, 'og:title');
   const description = extractOgTag(html, 'og:description');
+  const image = extractOgTag(html, 'og:image');
 
   if (debug) {
     const metaTags = [...html.matchAll(/<meta[^>]+>/gi)].map(m => m[0]).slice(0, 30);
@@ -112,6 +161,7 @@ async function fetchAndExtract(url, debug, debugLog, stepLabel) {
       htmlLength: html.length,
       title,
       description,
+      image,
       metaTags,
     });
   }
@@ -122,6 +172,7 @@ async function fetchAndExtract(url, debug, debugLog, stepLabel) {
   return {
     title: isGeneric ? '' : title,
     description: isGeneric ? '' : description,
+    image: isGeneric ? '' : image,
     finalUrl: resp.url || url,
     html,
   };
@@ -136,7 +187,7 @@ async function fetchFacebookPage(url, debug = false) {
     return { error: firstResult.error, finalUrl: url, debugLog };
   }
   if (firstResult.title || firstResult.description) {
-    return { title: firstResult.title, description: firstResult.description, finalUrl: firstResult.finalUrl, debugLog };
+    return { title: firstResult.title, description: firstResult.description, image: firstResult.image, finalUrl: firstResult.finalUrl, debugLog };
   }
 
   // Step 2: For /share/ URLs, try to extract the canonical post URL from the
@@ -149,24 +200,34 @@ async function fetchFacebookPage(url, debug = false) {
       if (debug) debugLog.push({ info: `Resolved share → ${postUrl}` });
       const postResult = await fetchAndExtract(postUrl, debug, debugLog, 'resolved-post');
       if (!postResult.error && (postResult.title || postResult.description)) {
-        return { title: postResult.title, description: postResult.description, finalUrl: postResult.finalUrl, debugLog };
+        return { title: postResult.title, description: postResult.description, image: postResult.image, finalUrl: postResult.finalUrl, debugLog };
       }
     } else if (debug) {
       debugLog.push({ info: 'No story_fbid found in HTML' });
     }
   }
 
-  // Step 3: Try m.facebook.com as last resort
+  // Step 3: Try m.facebook.com
   const mobileUrl = toMobileUrl(url);
   if (mobileUrl !== url) {
     if (debug) debugLog.push({ info: `Trying mobile: ${mobileUrl}` });
     const mResult = await fetchAndExtract(mobileUrl, debug, debugLog, 'mobile');
     if (!mResult.error && (mResult.title || mResult.description)) {
-      return { title: mResult.title, description: mResult.description, finalUrl: mResult.finalUrl, debugLog };
+      return { title: mResult.title, description: mResult.description, image: mResult.image, finalUrl: mResult.finalUrl, debugLog };
     }
   }
 
-  return { title: '', description: '', finalUrl: firstResult.finalUrl, debugLog };
+  // Step 4: For /photo/ URLs, try lookaside crawler media endpoint
+  const fbid = extractFbidFromUrl(url);
+  if (fbid) {
+    if (debug) debugLog.push({ info: `Photo URL detected, fbid=${fbid}, trying lookaside` });
+    const lookResult = await fetchLookasideImage(fbid, debug, debugLog);
+    if (lookResult.success) {
+      return { title: '', description: '', image: lookResult.url, finalUrl: url, debugLog };
+    }
+  }
+
+  return { title: '', description: '', image: '', finalUrl: firstResult.finalUrl, debugLog };
 }
 
 export default {
@@ -174,6 +235,38 @@ export default {
     // Only allow GET
     if (request.method !== 'GET') {
       return Response.json({ error: 'Method not allowed' }, { status: 405 });
+    }
+
+    // Image proxy: ?image_fbid={fbid} — proxies lookaside image as binary
+    // Placed before auth check: these are public Facebook images, and the bot
+    // (or Lark card renderer) may not send auth headers.
+    const imageFbid = new URL(request.url).searchParams.get('image_fbid');
+    if (imageFbid) {
+      if (!/^\d+$/.test(imageFbid)) {
+        return Response.json({ error: 'Invalid image_fbid (must be numeric)' }, { status: 400 });
+      }
+      try {
+        const lookasideUrl = buildLookasideUrl(imageFbid);
+        const resp = await fetch(lookasideUrl, {
+          headers: { 'User-Agent': 'Twitterbot/1.0' },
+          redirect: 'follow',
+        });
+        const contentType = resp.headers.get('Content-Type') || '';
+        if (!resp.ok || !contentType.startsWith('image/')) {
+          return Response.json(
+            { error: `Lookaside returned ${resp.status}, Content-Type: ${contentType}` },
+            { status: 502 },
+          );
+        }
+        return new Response(resp.body, {
+          headers: {
+            'Content-Type': contentType,
+            'Cache-Control': 'public, max-age=86400',
+          },
+        });
+      } catch (err) {
+        return Response.json({ error: err.message }, { status: 502 });
+      }
     }
 
     // API key check (skip if API_KEY not configured)
@@ -187,14 +280,33 @@ export default {
 
     const url = new URL(request.url).searchParams.get('url');
     if (!url) {
-      return Response.json({ error: 'Missing ?url= parameter' }, { status: 400 });
+      return Response.json({ error: 'Missing ?url= or ?image_fbid= parameter' }, { status: 400 });
     }
 
     if (!isFacebookUrl(url)) {
       return Response.json({ error: 'Only Facebook URLs are allowed' }, { status: 403 });
     }
 
-    const debug = new URL(request.url).searchParams.get('debug') === '1';
+    const params = new URL(request.url).searchParams;
+    const debug = params.get('debug') === '1';
+    const raw = params.get('raw') === '1';
+
+    // raw=1: return raw HTML from direct fetch (for debugging)
+    if (raw) {
+      try {
+        const resp = await fetch(url, {
+          headers: { 'User-Agent': 'Twitterbot/1.0' },
+          redirect: 'follow',
+        });
+        const html = await resp.text();
+        return new Response(html, {
+          status: resp.status,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        });
+      } catch (err) {
+        return Response.json({ error: err.message }, { status: 502 });
+      }
+    }
 
     try {
       const result = await fetchFacebookPage(url, debug);
@@ -204,6 +316,7 @@ export default {
       const response = {
         title: result.title,
         description: result.description,
+        image: result.image,
         finalUrl: result.finalUrl,
       };
       if (debug) response.debugLog = result.debugLog;

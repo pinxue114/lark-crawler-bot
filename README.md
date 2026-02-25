@@ -136,6 +136,16 @@ At each step, the bot checks whether Facebook returned real content or just a ge
 
 > **For most users**: The bot works out of the box (methods 1, 2, and 4 require no setup). Deploy the Cloudflare Worker (method 3) only if Facebook previews are frequently missing on your server.
 
+### Facebook Photo URLs
+
+Facebook photo links (`/photo/?fbid=XXX`) receive special treatment. Since Facebook blocks direct access to photo images from most servers, the bot uses the Cloudflare Worker's lookaside fallback:
+
+1. **Worker detects photo URL** — extracts the `fbid` from the URL and fetches the image from Facebook's `lookaside.fbsbx.com/lookaside/crawler/media/?media_id={fbid}` endpoint.
+2. **Worker image proxy** — the `?image_fbid={fbid}` endpoint on the Worker proxies the lookaside image as a binary response, so the bot can download it without needing a special User-Agent.
+3. **Bot downloads and saves** — when crawler.py returns an `image_url` for a photo URL, the bot downloads the image via the Worker proxy, uploads it to Lark Drive, and replies with a "View Image" card.
+
+> **Note**: This feature requires the Cloudflare Worker to be deployed (`FB_PROXY_URL` must be set). Without it, photo URLs fall back to a basic title extracted from the URL.
+
 ### Deploy the Cloudflare Worker (Optional)
 
 ```bash
