@@ -60,10 +60,17 @@
 
    **選填 — Facebook Proxy** *（改善雲端伺服器上的 Facebook 網址 metadata 抓取）*
    - `FB_PROXY_URL` — Cloudflare Worker proxy 網址。先部署 `cf-worker/`，再將 Worker 網址填入此處（例如 `https://fb-meta-proxy.<subdomain>.workers.dev`）。
-   - `FB_PROXY_KEY` — proxy 的 API key，須與 Worker 端設定的 `API_KEY` 一致；若未設定 key 則留空。
+   - `FB_PROXY_KEY` — proxy 的 API key，須與 Worker 端設定的 `API_KEY` 一致；若 Worker 有設定 `API_KEY`，metadata 與圖片代理端點都需要帶這個 key。
 
    **選填 — 伺服器**
    - `PORT` — Flask 伺服器端口，預設 `5000`，通常不需修改。
+
+   **選填 — 安全與穩定性**
+   - `ALLOW_PRIVATE_TARGETS` — 預設 `false`；阻擋對 localhost/私有 IP 的 metadata 抓取請求。
+   - `MAX_REDIRECTS` — 每次抓取允許的 redirect 次數上限（預設 `5`）。
+   - `EVENT_DEDUP_TTL_SECONDS` — 事件去重快取 TTL（秒，預設 `21600`）。
+   - `EVENT_DEDUP_MAX_SIZE` — 事件去重快取最大保留數（預設 `20000`）。
+   - `MAX_IN_FLIGHT_TASKS` — 背景任務最大同時在途數（排隊+執行，預設 `100`）。
 
 4. **多維表格設定**：
    確認目標多維表格包含以下欄位：

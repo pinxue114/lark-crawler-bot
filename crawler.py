@@ -1,8 +1,14 @@
 import os
 import re
+import socket
+import ipaddress
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, urljoin
+
+
+ALLOW_PRIVATE_TARGETS = os.getenv("ALLOW_PRIVATE_TARGETS", "false").lower() == "true"
+MAX_REDIRECTS = int(os.getenv("MAX_REDIRECTS", "5"))
 
 def extract_urls(text: str) -> list[str]:
     """
@@ -19,6 +25,95 @@ def extract_urls(text: str) -> list[str]:
         re.IGNORECASE
     )
     return url_pattern.findall(text)
+
+
+def _is_blocked_ip(ip_str: str) -> bool:
+    """Return True for private/local/reserved addresses that should not be crawled."""
+    try:
+        ip_obj = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True
+
+    return (
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_reserved
+        or ip_obj.is_unspecified
+    )
+
+
+def _validate_target_url(url: str) -> tuple[bool, str]:
+    """Validate that URL target is safe to request from the server environment."""
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        return False, f"Invalid URL: {exc}"
+
+    if parsed.scheme not in ("http", "https"):
+        return False, f"Unsupported URL scheme: {parsed.scheme!r}"
+
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return False, "Missing hostname"
+
+    if host == "localhost" or host.endswith(".localhost"):
+        return False, "Localhost is not allowed"
+
+    try:
+        # If host is already a literal IP, validate directly.
+        ipaddress.ip_address(host)
+        if _is_blocked_ip(host):
+            return False, f"Blocked IP target: {host}"
+        return True, ""
+    except ValueError:
+        # Hostname: resolve and reject if any resolved address is private/local.
+        pass
+
+    try:
+        addr_infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        return False, f"DNS resolution failed: {exc}"
+
+    resolved_ips = {info[4][0] for info in addr_infos}
+    if not resolved_ips:
+        return False, "No resolved IP addresses"
+
+    for ip in resolved_ips:
+        if _is_blocked_ip(ip):
+            return False, f"Blocked resolved IP: {ip}"
+
+    return True, ""
+
+
+def _safe_get(url: str, headers: dict | None = None, timeout: int = 10) -> requests.Response:
+    """
+    HTTP GET with SSRF guardrails.
+    Validates URL before every redirect hop.
+    """
+    session = requests.Session()
+    if headers:
+        session.headers.update(headers)
+
+    current = url
+    for _ in range(MAX_REDIRECTS + 1):
+        if not ALLOW_PRIVATE_TARGETS:
+            ok, reason = _validate_target_url(current)
+            if not ok:
+                raise ValueError(f"Blocked URL target: {reason}")
+
+        resp = session.get(current, timeout=timeout, allow_redirects=False)
+        if resp.is_redirect or resp.is_permanent_redirect:
+            location = resp.headers.get("Location")
+            if not location:
+                return resp
+            current = urljoin(current, location)
+            continue
+
+        return resp
+
+    raise requests.TooManyRedirects(f"Exceeded redirect limit ({MAX_REDIRECTS}) for {url}")
 
 def _is_facebook_url(url: str) -> bool:
     """Check if the URL belongs to Facebook/Meta domains."""
@@ -100,8 +195,7 @@ def _fetch_facebook_via_microlink(url: str) -> dict | None:
 def _fetch_facebook_direct(url: str) -> dict | None:
     """Direct crawl with Twitterbot UA — Facebook serves full OG tags (incl. og:image) to social crawlers."""
     try:
-        resp = requests.get(url, headers={"User-Agent": "Twitterbot/1.0"},
-                            timeout=10, allow_redirects=True)
+        resp = _safe_get(url, headers={"User-Agent": "Twitterbot/1.0"}, timeout=10)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
         og_title = soup.find('meta', property='og:title')
@@ -285,9 +379,7 @@ def fetch_page_metadata(url: str) -> dict:
     last_error = None
     for headers in headers_list:
         try:
-            session = requests.Session()
-            session.headers.update(headers)
-            response = session.get(url, timeout=10, allow_redirects=True)
+            response = _safe_get(url, headers=headers, timeout=10)
             response.encoding = response.apparent_encoding
             response.raise_for_status()
 

@@ -60,10 +60,17 @@ A Lark Base (Bitable) integration bot that listens for group messages via webhoo
 
    **Optional — Facebook Proxy** *(improves Facebook URL metadata on cloud servers)*
    - `FB_PROXY_URL` — Cloudflare Worker proxy URL. Deploy `cf-worker/` first, then paste the Worker URL here (e.g. `https://fb-meta-proxy.<subdomain>.workers.dev`).
-   - `FB_PROXY_KEY` — API key for the proxy. Must match the Worker's `API_KEY` secret; leave empty if no key is configured.
+   - `FB_PROXY_KEY` — API key for the proxy. Must match the Worker's `API_KEY` secret; if Worker `API_KEY` is set, both metadata and image proxy endpoints require this key.
 
    **Optional — Server**
    - `PORT` — Flask server port, defaults to `5000`. Usually no change needed.
+
+   **Optional — Security & Reliability**
+   - `ALLOW_PRIVATE_TARGETS` — defaults to `false`; blocks metadata fetch to localhost/private IPs.
+   - `MAX_REDIRECTS` — max redirect hops per crawl request (default `5`).
+   - `EVENT_DEDUP_TTL_SECONDS` — dedup cache TTL in seconds (default `21600`).
+   - `EVENT_DEDUP_MAX_SIZE` — max dedup events kept in memory (default `20000`).
+   - `MAX_IN_FLIGHT_TASKS` — max background tasks (queued + running, default `100`).
 
 4. **Bitable Configuration**:
    Ensure your target Bitable has the following field names:

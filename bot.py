@@ -3,6 +3,7 @@ import os
 import json
 import time
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
@@ -30,7 +31,7 @@ from lark_oapi.api.bitable.v1 import (
 from crawler import extract_urls, fetch_page_metadata
 
 # Event deduplication: Lark may retry delivery if response is slow
-_processed_events = set()
+_processed_events = OrderedDict()
 _event_lock = threading.Lock()          # Atomic check-then-add for dedup
 _executor = ThreadPoolExecutor(max_workers=4)  # Background processing pool
 _bot_start_time = int(time.time())
@@ -45,8 +46,17 @@ VERIFICATION_TOKEN = os.getenv("VERIFICATION_TOKEN")
 
 BITABLE_APP_TOKEN = os.getenv("BITABLE_APP_TOKEN")
 BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID")
+BITABLE_TABLE_URL = (os.getenv("BITABLE_TABLE_URL") or "").strip()
 DRIVE_FOLDER_TOKEN = os.getenv("DRIVE_FOLDER_TOKEN")
+FB_PROXY_URL = (os.getenv("FB_PROXY_URL") or "").strip()
+FB_PROXY_KEY = (os.getenv("FB_PROXY_KEY") or "").strip()
 PORT = int(os.getenv("PORT", 5000))
+
+# Reliability / resource-guard settings
+EVENT_DEDUP_TTL_SECONDS = int(os.getenv("EVENT_DEDUP_TTL_SECONDS", "21600"))  # 6h
+EVENT_DEDUP_MAX_SIZE = int(os.getenv("EVENT_DEDUP_MAX_SIZE", "20000"))
+MAX_IN_FLIGHT_TASKS = int(os.getenv("MAX_IN_FLIGHT_TASKS", "100"))
+_task_slots = threading.BoundedSemaphore(MAX_IN_FLIGHT_TASKS)
 
 # Initialize Lark Client
 client = lark.Client.builder() \
@@ -57,10 +67,68 @@ client = lark.Client.builder() \
 
 app = Flask(__name__)
 
-def build_card_message(metadata: dict) -> str:
+
+def _cleanup_processed_events(now_ts: int) -> None:
+    """Keep dedup cache bounded by TTL and max size."""
+    cutoff = now_ts - EVENT_DEDUP_TTL_SECONDS
+
+    # Remove expired entries (oldest-first due to OrderedDict insertion order)
+    while _processed_events:
+        _, seen_ts = next(iter(_processed_events.items()))
+        if seen_ts >= cutoff:
+            break
+        _processed_events.popitem(last=False)
+
+    # Hard cap to prevent unbounded memory growth
+    while len(_processed_events) > EVENT_DEDUP_MAX_SIZE:
+        _processed_events.popitem(last=False)
+
+
+def _process_message_with_release(msg_type, message_id, timestamp_ms, sender_open_id, content_str):
+    """Wrapper that always releases a queue slot after background processing."""
+    try:
+        _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content_str)
+    finally:
+        _task_slots.release()
+
+def _get_bitable_table_url() -> str:
+    """Resolve Bitable table URL from explicit env or app/table tokens."""
+    if BITABLE_TABLE_URL:
+        return BITABLE_TABLE_URL
+    if BITABLE_APP_TOKEN and BITABLE_TABLE_ID:
+        return f"https://feishu.cn/base/{BITABLE_APP_TOKEN}?table={BITABLE_TABLE_ID}"
+    return ""
+
+
+def build_card_message(metadata: dict, include_bitable_button: bool = False) -> str:
     """
     Constructs a Lark interactive message card JSON.
     """
+    actions = [
+        {
+            "tag": "button",
+            "text": {
+                "content": metadata.get('button_text', 'Visit Link'),
+                "tag": "plain_text"
+            },
+            "url": metadata.get('url'),
+            "type": "primary"
+        }
+    ]
+
+    if include_bitable_button:
+        bitable_url = _get_bitable_table_url()
+        if bitable_url:
+            actions.append({
+                "tag": "button",
+                "text": {
+                    "content": "前往多維表格",
+                    "tag": "plain_text"
+                },
+                "url": bitable_url,
+                "type": "default"
+            })
+
     card = {
         "config": {
             "wide_screen_mode": True
@@ -82,17 +150,7 @@ def build_card_message(metadata: dict) -> str:
             },
             {
                 "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {
-                            "content": metadata.get('button_text', 'Visit Link'),
-                            "tag": "plain_text"
-                        },
-                        "url": metadata.get('url'),
-                        "type": "primary"
-                    }
-                ]
+                "actions": actions
             }
         ],
         "header": {
@@ -197,9 +255,16 @@ def upload_to_drive(file_obj, file_name: str) -> str:
 def download_image_from_url(url: str) -> tuple:
     """Download image from external URL. Returns (BytesIO, filename)."""
     try:
-        resp = requests.get(url, timeout=15, headers={
+        headers = {
             "User-Agent": "facebookexternalhit/1.1"
-        })
+        }
+        # Worker image endpoint may require the same bearer token as metadata endpoint.
+        if FB_PROXY_URL and FB_PROXY_KEY:
+            proxy_target = FB_PROXY_URL.rstrip("/")
+            if url.startswith(proxy_target):
+                headers["Authorization"] = f"Bearer {FB_PROXY_KEY}"
+
+        resp = requests.get(url, timeout=15, headers=headers)
         resp.raise_for_status()
 
         # Try to get filename from URL path
@@ -250,6 +315,7 @@ def set_file_link_sharing(file_token: str):
 def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     event_id = data.header.event_id
     create_time = int(data.event.message.create_time) // 1000  # ms to seconds
+    now_ts = int(time.time())
     print(f"Received message event: {event_id}, create_time: {create_time}")
 
     # Skip events from before bot started (stale retries after restart)
@@ -259,10 +325,11 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
 
     # Atomic dedup: lock guarantees only one thread passes for a given event_id
     with _event_lock:
+        _cleanup_processed_events(now_ts)
         if event_id in _processed_events:
             print(f"Skipping duplicate event: {event_id}")
             return
-        _processed_events.add(event_id)
+        _processed_events[event_id] = now_ts
 
     msg_type = data.event.message.message_type
     message_id = data.event.message.message_id
@@ -303,10 +370,22 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         return
 
     # Submit heavy work to background thread — webhook returns immediately
-    _executor.submit(
-        _process_message, msg_type, message_id, timestamp_ms,
-        sender_open_id, content_str
-    )
+    if not _task_slots.acquire(blocking=False):
+        with _event_lock:
+            _processed_events.pop(event_id, None)
+        print(f"Background queue full ({MAX_IN_FLIGHT_TASKS}), dropping event: {event_id}")
+        return
+
+    try:
+        _executor.submit(
+            _process_message_with_release, msg_type, message_id, timestamp_ms,
+            sender_open_id, content_str
+        )
+    except Exception as e:
+        _task_slots.release()
+        with _event_lock:
+            _processed_events.pop(event_id, None)
+        print(f"Failed to submit background task for {event_id}: {e}")
 
 
 def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content_str):
@@ -342,7 +421,7 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
                 "description": "Image has been saved to Drive.",
                 "url": download_url,
                 "button_text": "View Image",
-            })
+            }, include_bitable_button=True)
 
             reply_body = ReplyMessageRequestBody.builder() \
                 .content(card_content) \
@@ -390,7 +469,7 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
                             "description": metadata.get("description", ""),
                             "url": download_url,
                             "button_text": "View Image",
-                        })
+                        }, include_bitable_button=True)
 
                         reply_body = ReplyMessageRequestBody.builder() \
                             .content(card_content) \
@@ -432,7 +511,7 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
                 continue
 
             # Normal Link Preview (original logic)
-            card_content = build_card_message(metadata)
+            card_content = build_card_message(metadata, include_bitable_button=True)
 
             reply_body = ReplyMessageRequestBody.builder() \
                 .content(card_content) \

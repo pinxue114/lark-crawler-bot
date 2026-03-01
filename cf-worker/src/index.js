@@ -237,9 +237,17 @@ export default {
       return Response.json({ error: 'Method not allowed' }, { status: 405 });
     }
 
+    // API key check (skip if API_KEY not configured)
+    const apiKey = env.API_KEY;
+    if (apiKey) {
+      const auth = request.headers.get('Authorization') || '';
+      if (auth !== `Bearer ${apiKey}`) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+    }
+
     // Image proxy: ?image_fbid={fbid} — proxies lookaside image as binary
-    // Placed before auth check: these are public Facebook images, and the bot
-    // (or Lark card renderer) may not send auth headers.
+    // Protected by API key (if configured) to prevent anonymous abuse.
     const imageFbid = new URL(request.url).searchParams.get('image_fbid');
     if (imageFbid) {
       if (!/^\d+$/.test(imageFbid)) {
@@ -266,15 +274,6 @@ export default {
         });
       } catch (err) {
         return Response.json({ error: err.message }, { status: 502 });
-      }
-    }
-
-    // API key check (skip if API_KEY not configured)
-    const apiKey = env.API_KEY;
-    if (apiKey) {
-      const auth = request.headers.get('Authorization') || '';
-      if (auth !== `Bearer ${apiKey}`) {
-        return Response.json({ error: 'Unauthorized' }, { status: 401 });
       }
     }
 
