@@ -245,6 +245,22 @@ export default {
       if (!/^\d+$/.test(imageFbid)) {
         return Response.json({ error: 'Invalid image_fbid (must be numeric)' }, { status: 400 });
       }
+      // Optional: restrict image proxy to known referers
+      const allowedReferers = env.ALLOWED_REFERERS; // comma-separated, e.g. "feishu.cn,larksuite.com"
+      if (allowedReferers) {
+        const referer = request.headers.get('Referer') || '';
+        if (referer) {
+          try {
+            const refHost = new URL(referer).hostname;
+            const allowed = allowedReferers.split(',').map(s => s.trim());
+            if (!allowed.some(a => refHost.endsWith(a))) {
+              return Response.json({ error: 'Forbidden' }, { status: 403 });
+            }
+          } catch {
+            return Response.json({ error: 'Forbidden' }, { status: 403 });
+          }
+        }
+      }
       try {
         const lookasideUrl = buildLookasideUrl(imageFbid);
         const resp = await fetch(lookasideUrl, {
@@ -290,6 +306,11 @@ export default {
     const params = new URL(request.url).searchParams;
     const debug = params.get('debug') === '1';
     const raw = params.get('raw') === '1';
+
+    // raw and debug modes require API_KEY to be configured
+    if (!apiKey && (raw || debug)) {
+      return Response.json({ error: 'Debug features require API_KEY configuration' }, { status: 403 });
+    }
 
     // raw=1: return raw HTML from direct fetch (for debugging)
     if (raw) {
