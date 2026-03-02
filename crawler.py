@@ -1,7 +1,10 @@
+import logging
 import os
 import re
 import requests
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 from urllib.parse import urlparse, unquote, parse_qs
 
 _session = requests.Session()
@@ -75,13 +78,13 @@ def _fetch_facebook_via_microlink(url: str) -> dict | None:
         resp.raise_for_status()
         payload = resp.json()
         if payload.get("status") != "success":
-            print(f"Microlink: non-success status for {url}: {payload.get('status')}")
+            logger.warning(f"Microlink: non-success status for {url}: {payload.get('status')}")
             return None
         data = payload.get("data") or {}
         title = (data.get("title") or "").strip()
         description = (data.get("description") or "").strip()
         if _is_generic_facebook_metadata(title, description):
-            print(f"Microlink: generic metadata filtered for {url}: title={title!r}")
+            logger.info(f"Microlink: generic metadata filtered for {url}: title={title!r}")
             return None
         image_url = ""
         img = data.get("image")
@@ -89,13 +92,13 @@ def _fetch_facebook_via_microlink(url: str) -> dict | None:
             image_url = (img.get("url") or "").strip()
         elif isinstance(img, str):
             image_url = img.strip()
-        print(f"Microlink: got metadata for {url}: title={title!r}")
+        logger.info(f"Microlink: got metadata for {url}: title={title!r}")
         result = {"url": url, "title": title, "description": description or "No description available."}
         if image_url:
             result["image_url"] = image_url
         return result
     except Exception as e:
-        print(f"Microlink API error for {url}: {e}")
+        logger.error(f"Microlink API error for {url}: {e}")
         return None
 
 
@@ -111,18 +114,18 @@ def _fetch_facebook_direct(url: str) -> dict | None:
         title = (og_title.get('content') or "").strip() if og_title else ""
         description = (og_desc.get('content') or "").strip() if og_desc else ""
         if _is_generic_facebook_metadata(title, description):
-            print(f"Direct crawl: generic metadata filtered for {url}: title={title!r}")
+            logger.info(f"Direct crawl: generic metadata filtered for {url}: title={title!r}")
             return None
         og_image = soup.find('meta', property='og:image')
         image_url = (og_image.get('content') or "").strip() if og_image else ""
-        print(f"Direct crawl: got metadata for {url}: title={title!r}")
+        logger.info(f"Direct crawl: got metadata for {url}: title={title!r}")
         result = {"url": url, "title": title or "No Title",
                 "description": description or "No description available."}
         if image_url:
             result["image_url"] = image_url
         return result
     except Exception as e:
-        print(f"Direct crawl error for {url}: {e}")
+        logger.error(f"Direct crawl error for {url}: {e}")
         return None
 
 
@@ -131,7 +134,7 @@ def _fetch_facebook_via_proxy(url: str) -> dict | None:
     """Fallback: fetch Facebook metadata via Cloudflare Worker proxy."""
     proxy_url = os.getenv("FB_PROXY_URL")
     if not proxy_url:
-        print("FB proxy: FB_PROXY_URL not set, skipping")
+        logger.info("FB proxy: FB_PROXY_URL not set, skipping")
         return None
     try:
         headers = {}
@@ -142,7 +145,7 @@ def _fetch_facebook_via_proxy(url: str) -> dict | None:
                             headers=headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        print(f"FB proxy response for {url}: {data}")
+        logger.info(f"FB proxy response for {url}: {data}")
         if "error" in data:
             return None
         title = (data.get("title") or "").strip()
@@ -160,24 +163,24 @@ def _fetch_facebook_via_proxy(url: str) -> dict | None:
                     media_id = parse_qs(urlparse(url).query).get("fbid", [None])[0]
                 if media_id:
                     proxy_image_url = f"{proxy_url.rstrip('/')}?image_fbid={media_id}"
-                    print(f"FB proxy: photo image found, fbid={media_id}")
+                    logger.info(f"FB proxy: photo image found, fbid={media_id}")
                     return {
                         "url": url,
                         "title": "Facebook Photo",
                         "description": url,
                         "image_url": proxy_image_url,
                     }
-            print(f"FB proxy: generic metadata filtered for {url}: title={title!r}")
+            logger.info(f"FB proxy: generic metadata filtered for {url}: title={title!r}")
             return None
 
-        print(f"FB proxy: got metadata for {url}: title={title!r}")
+        logger.info(f"FB proxy: got metadata for {url}: title={title!r}")
         result = {"url": url, "title": title or "No Title",
                 "description": description or "No description available."}
         if image_url:
             result["image_url"] = image_url
         return result
     except Exception as e:
-        print(f"FB proxy error for {url}: {e}")
+        logger.error(f"FB proxy error for {url}: {e}")
         return None
 
 
@@ -315,7 +318,7 @@ def fetch_page_metadata(url: str) -> dict:
                 break
 
         except Exception as e:
-            print(f"Error fetching metadata for {url}: {e}")
+            logger.error(f"Error fetching metadata for {url}: {e}")
             last_error = str(e)
 
     # Only set error description if no attempt succeeded at all
@@ -337,7 +340,7 @@ def fetch_page_metadata(url: str) -> dict:
                 if description:
                     metadata['description'] = description
         except Exception as e:
-            print(f"Microlink fallback error for {url}: {e}")
+            logger.error(f"Microlink fallback error for {url}: {e}")
 
     return metadata
 

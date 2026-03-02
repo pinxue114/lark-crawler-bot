@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import json
 import time
@@ -38,6 +39,12 @@ _bot_start_time = int(time.time())
 
 # Load environment variables
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
@@ -169,7 +176,7 @@ def reply_with_card(message_id: str, metadata: dict) -> bool:
 
     resp = client.im.v1.message.reply(reply_req)
     if not resp.success():
-        print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
+        logger.error(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
         return False
     return True
 
@@ -178,7 +185,7 @@ def save_to_bitable(metadata: dict, timestamp_ms: int, sender_open_id: str):
     Saves the extracted URL metadata to Lark Bitable.
     """
     if not BITABLE_APP_TOKEN or not BITABLE_TABLE_ID:
-        print("Bitable credentials not configured. Skipping save.")
+        logger.warning("Bitable credentials not configured. Skipping save.")
         return
 
     try:
@@ -200,11 +207,11 @@ def save_to_bitable(metadata: dict, timestamp_ms: int, sender_open_id: str):
         resp = client.bitable.v1.app_table_record.create(req)
         
         if not resp.success():
-            print(f"Failed to add bitable record: {resp.code} {resp.msg} {resp.raw.content}")
+            logger.error(f"Failed to add bitable record: {resp.code} {resp.msg} {resp.raw.content}")
         else:
-            print(f"Successfully added record to Bitable! record_id: {resp.data.record.record_id}")
+            logger.info(f"Successfully added record to Bitable! record_id: {resp.data.record.record_id}")
     except Exception as e:
-        print(f"Exception saving to bitable: {e}")
+        logger.exception(f"Exception saving to bitable: {e}")
 
 def download_message_resource(message_id: str, file_key: str, resource_type: str = "image") -> tuple:
     """
@@ -219,7 +226,7 @@ def download_message_resource(message_id: str, file_key: str, resource_type: str
 
     resp = client.im.v1.message_resource.get(req)
     if not resp.success():
-        print(f"Failed to download {resource_type}: {resp.code} {resp.msg}")
+        logger.error(f"Failed to download {resource_type}: {resp.code} {resp.msg}")
         return None, None
 
     file_name = resp.file_name if hasattr(resp, 'file_name') and resp.file_name else f"{file_key}.png"
@@ -231,7 +238,7 @@ def upload_to_drive(file_obj, file_name: str) -> str:
     Uploads a file to Lark Drive and returns the file token.
     """
     if not DRIVE_FOLDER_TOKEN:
-        print("DRIVE_FOLDER_TOKEN not configured. Skipping upload.")
+        logger.warning("DRIVE_FOLDER_TOKEN not configured. Skipping upload.")
         return None
 
     if isinstance(file_obj, bytes):
@@ -254,11 +261,11 @@ def upload_to_drive(file_obj, file_name: str) -> str:
 
     resp = client.drive.v1.file.upload_all(req)
     if not resp.success():
-        print(f"Failed to upload to drive: {resp.code} {resp.msg}")
+        logger.error(f"Failed to upload to drive: {resp.code} {resp.msg}")
         return None
 
     file_token = resp.data.file_token
-    print(f"Uploaded to drive, file_token: {file_token}")
+    logger.info(f"Uploaded to drive, file_token: {file_token}")
     return file_token
 
 
@@ -287,7 +294,7 @@ def download_image_from_url(url: str) -> tuple:
 
         return io.BytesIO(resp.content), filename
     except Exception as e:
-        print(f"Failed to download image from {url}: {e}")
+        logger.exception(f"Failed to download image from {url}: {e}")
         return None, None
 
 
@@ -307,28 +314,28 @@ def set_file_link_sharing(file_token: str):
 
         resp = client.drive.v1.permission_public.patch(req)
         if not resp.success():
-            print(f"Failed to set link sharing: {resp.code} {resp.msg}")
+            logger.error(f"Failed to set link sharing: {resp.code} {resp.msg}")
         else:
-            print(f"Link sharing enabled for {file_token}")
+            logger.info(f"Link sharing enabled for {file_token}")
     except Exception as e:
-        print(f"Exception setting link sharing: {e}")
+        logger.exception(f"Exception setting link sharing: {e}")
 
 
 # Define event handler — fast path (runs in webhook thread, must return quickly)
 def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     event_id = data.header.event_id
     create_time = int(data.event.message.create_time) // 1000  # ms to seconds
-    print(f"Received message event: {event_id}, create_time: {create_time}")
+    logger.info(f"Received message event: {event_id}, create_time: {create_time}")
 
     # Skip events from before bot started (stale retries after restart)
     if create_time < _bot_start_time:
-        print(f"Skipping stale event: {event_id} (created before bot start)")
+        logger.info(f"Skipping stale event: {event_id} (created before bot start)")
         return
 
     # Atomic dedup: lock guarantees only one thread passes for a given event_id
     with _event_lock:
         if event_id in _processed_events:
-            print(f"Skipping duplicate event: {event_id}")
+            logger.info(f"Skipping duplicate event: {event_id}")
             return
         _processed_events[event_id] = True
 
@@ -343,7 +350,7 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         try:
             content_json = json.loads(content_str)
         except Exception:
-            print("Failed to parse image/file content")
+            logger.warning("Failed to parse image/file content")
             return
 
         if msg_type == "image":
@@ -352,7 +359,7 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
             file_key = content_json.get("file_key", "")
             fname = content_json.get("file_name", "").lower()
             if not fname.split(".")[-1] in ("png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "heic"):
-                print(f"Skipping non-image file: {fname}")
+                logger.info(f"Skipping non-image file: {fname}")
                 return
 
         if not file_key:
@@ -388,7 +395,7 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
             else:
                 file_key = content_json.get("file_key", "")
 
-            print(f"Processing {msg_type}: {file_key}")
+            logger.info(f"Processing {msg_type}: {file_key}")
 
             resource_type = "image" if msg_type == "image" else "file"
             file_obj, file_name = download_message_resource(message_id, file_key, resource_type)
@@ -430,7 +437,7 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
         bitable_records = []
 
         for url in urls:
-            print(f"Processing URL: {url}")
+            logger.info(f"Processing URL: {url}")
             metadata = fetch_page_metadata(url)
             image_url = metadata.get("image_url")
 
@@ -484,13 +491,13 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
                     .build()
                 resp = client.im.v1.message.reply(reply_req)
                 if not resp.success():
-                    print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
+                    logger.error(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
 
         for record_meta in bitable_records:
             save_to_bitable(record_meta, timestamp_ms, sender_open_id)
 
     except Exception as e:
-        print(f"Error processing message {message_id}: {e}")
+        logger.exception(f"Error processing message {message_id}: {e}")
         
 
 # Register handler
