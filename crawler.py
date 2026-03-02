@@ -34,6 +34,11 @@ def _is_safe_url(url: str) -> bool:
         if not hostname:
             return False
 
+        # Block Lark/Feishu domains (require login, no useful metadata)
+        h = hostname.lower()
+        if h.endswith(".larksuite.com") or h.endswith(".feishu.cn") or h in ("larksuite.com", "feishu.cn"):
+            return False
+
         # Check if hostname is an IP literal
         try:
             addr = ipaddress.ip_address(hostname)
