@@ -318,8 +318,8 @@ def fetch_page_metadata(url: str) -> dict:
     # SSRF protection: block private/reserved IPs for non-Facebook URLs
     if not _is_safe_url(url):
         logger.warning(f"SSRF blocked: {url}")
-        metadata['title'] = "Blocked"
-        metadata['description'] = "URL targets a private or reserved network."
+        metadata['title'] = "無法預覽"
+        metadata['description'] = "此網址無法抓取預覽內容。"
         return metadata
 
     headers_list = [
