@@ -106,6 +106,26 @@ def build_card_message(metadata: dict) -> str:
     }
     return json.dumps(card)
 
+def reply_with_card(message_id: str, metadata: dict) -> bool:
+    """Build a card and reply to a message. Returns True on success."""
+    card_content = build_card_message(metadata)
+
+    reply_body = ReplyMessageRequestBody.builder() \
+        .content(card_content) \
+        .msg_type("interactive") \
+        .build()
+
+    reply_req = ReplyMessageRequest.builder() \
+        .message_id(message_id) \
+        .request_body(reply_body) \
+        .build()
+
+    resp = client.im.v1.message.reply(reply_req)
+    if not resp.success():
+        print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
+        return False
+    return True
+
 def save_to_bitable(metadata: dict, timestamp_ms: int, sender_open_id: str):
     """
     Saves the extracted URL metadata to Lark Bitable.
@@ -338,26 +358,12 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
 
             download_url = f"https://feishu.cn/file/{file_token}"
 
-            card_content = build_card_message({
+            reply_with_card(message_id, {
                 "title": "Image Saved",
                 "description": "Image has been saved to Drive.",
                 "url": download_url,
                 "button_text": "View Image",
             })
-
-            reply_body = ReplyMessageRequestBody.builder() \
-                .content(card_content) \
-                .msg_type("interactive") \
-                .build()
-
-            reply_req = ReplyMessageRequest.builder() \
-                .message_id(message_id) \
-                .request_body(reply_body) \
-                .build()
-
-            resp = client.im.v1.message.reply(reply_req)
-            if not resp.success():
-                print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
 
             save_to_bitable(
                 {"title": "圖片", "description": "", "url": download_url},
@@ -386,24 +392,12 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
                     if file_token:
                         set_file_link_sharing(file_token)
                         download_url = f"https://feishu.cn/file/{file_token}"
-                        card_content = build_card_message({
+                        reply_with_card(message_id, {
                             "title": metadata.get("title", "Image Saved"),
                             "description": metadata.get("description", ""),
                             "url": download_url,
                             "button_text": "View Image",
                         })
-
-                        reply_body = ReplyMessageRequestBody.builder() \
-                            .content(card_content) \
-                            .msg_type("interactive") \
-                            .build()
-                        reply_req = ReplyMessageRequest.builder() \
-                            .message_id(message_id) \
-                            .request_body(reply_body) \
-                            .build()
-                        resp = client.im.v1.message.reply(reply_req)
-                        if not resp.success():
-                            print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
 
                         save_to_bitable(
                             {"title": metadata.get("title", "圖片"), "description": metadata.get("description", ""), "url": download_url},
@@ -412,42 +406,16 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
                         continue
 
                 # Download or upload failed — reply with error card
-                card_content = build_card_message({
+                reply_with_card(message_id, {
                     "title": "圖片下載失敗",
                     "description": f"無法從 Facebook 下載圖片：{metadata.get('title', '')}",
                     "url": url,
                     "button_text": "Open Link",
                 })
-
-                reply_body = ReplyMessageRequestBody.builder() \
-                    .content(card_content) \
-                    .msg_type("interactive") \
-                    .build()
-                reply_req = ReplyMessageRequest.builder() \
-                    .message_id(message_id) \
-                    .request_body(reply_body) \
-                    .build()
-                resp = client.im.v1.message.reply(reply_req)
-                if not resp.success():
-                    print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
                 continue
 
             # Normal Link Preview (original logic)
-            card_content = build_card_message(metadata)
-
-            reply_body = ReplyMessageRequestBody.builder() \
-                .content(card_content) \
-                .msg_type("interactive") \
-                .build()
-
-            reply_req = ReplyMessageRequest.builder() \
-                .message_id(message_id) \
-                .request_body(reply_body) \
-                .build()
-
-            resp = client.im.v1.message.reply(reply_req)
-            if not resp.success():
-                print(f"Failed to send reply: {resp.code} {resp.msg}, req_id: {resp.get_log_id()}")
+            reply_with_card(message_id, metadata)
 
             save_to_bitable(metadata, timestamp_ms, sender_open_id)
 

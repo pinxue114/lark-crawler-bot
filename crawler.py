@@ -4,6 +4,8 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, unquote, parse_qs
 
+_session = requests.Session()
+
 def extract_urls(text: str) -> list[str]:
     """
     Extracts all URLs from a given text string.
@@ -69,7 +71,7 @@ def _is_generic_facebook_metadata(title: str, description: str) -> bool:
 def _fetch_facebook_via_microlink(url: str) -> dict | None:
     """Free tier, no key needed. GET https://api.microlink.io?url=..."""
     try:
-        resp = requests.get("https://api.microlink.io", params={"url": url}, timeout=10)
+        resp = _session.get("https://api.microlink.io", params={"url": url}, timeout=10)
         resp.raise_for_status()
         payload = resp.json()
         if payload.get("status") != "success":
@@ -100,7 +102,7 @@ def _fetch_facebook_via_microlink(url: str) -> dict | None:
 def _fetch_facebook_direct(url: str) -> dict | None:
     """Direct crawl with Twitterbot UA — Facebook serves full OG tags (incl. og:image) to social crawlers."""
     try:
-        resp = requests.get(url, headers={"User-Agent": "Twitterbot/1.0"},
+        resp = _session.get(url, headers={"User-Agent": "Twitterbot/1.0"},
                             timeout=10, allow_redirects=True)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -136,7 +138,7 @@ def _fetch_facebook_via_proxy(url: str) -> dict | None:
         proxy_key = os.getenv("FB_PROXY_KEY")
         if proxy_key:
             headers["Authorization"] = f"Bearer {proxy_key}"
-        resp = requests.get(proxy_url, params={"url": url},
+        resp = _session.get(proxy_url, params={"url": url},
                             headers=headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
@@ -279,9 +281,7 @@ def fetch_page_metadata(url: str) -> dict:
     last_error = None
     for headers in headers_list:
         try:
-            session = requests.Session()
-            session.headers.update(headers)
-            response = session.get(url, timeout=10, allow_redirects=True)
+            response = _session.get(url, headers=headers, timeout=10, allow_redirects=True)
             response.encoding = response.apparent_encoding
             response.raise_for_status()
 
@@ -325,7 +325,7 @@ def fetch_page_metadata(url: str) -> dict:
     # Last resort: try Microlink.io for pages blocked by bot protection (e.g. Cloudflare)
     if metadata['title'] == "No Title" and metadata['description'].startswith("Failed to fetch"):
         try:
-            resp = requests.get("https://api.microlink.io", params={"url": url}, timeout=15)
+            resp = _session.get("https://api.microlink.io", params={"url": url}, timeout=15)
             resp.raise_for_status()
             payload = resp.json()
             if payload.get("status") == "success":
