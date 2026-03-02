@@ -90,17 +90,7 @@ def build_card_message(metadata: dict) -> str:
             },
             {
                 "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {
-                            "content": metadata.get('button_text', 'Visit Link'),
-                            "tag": "plain_text"
-                        },
-                        "url": metadata.get('url'),
-                        "type": "primary"
-                    }
-                ]
+                "actions": _build_action_buttons(metadata),
             }
         ],
         "header": {
@@ -112,6 +102,32 @@ def build_card_message(metadata: dict) -> str:
         }
     }
     return json.dumps(card)
+
+
+def _build_action_buttons(metadata: dict) -> list:
+    """Build action buttons: primary link + optional Bitable link."""
+    buttons = [
+        {
+            "tag": "button",
+            "text": {
+                "content": metadata.get('button_text', 'Visit Link'),
+                "tag": "plain_text"
+            },
+            "url": metadata.get('url'),
+            "type": "primary"
+        }
+    ]
+    if BITABLE_APP_TOKEN:
+        buttons.append({
+            "tag": "button",
+            "text": {
+                "content": "前往多維表格",
+                "tag": "plain_text"
+            },
+            "url": f"https://feishu.cn/base/{BITABLE_APP_TOKEN}",
+            "type": "default"
+        })
+    return buttons
 
 def build_multi_card_message(items: list) -> str:
     """Build a card with multiple URL preview sections."""
@@ -136,17 +152,7 @@ def build_multi_card_message(items: list) -> str:
             },
             {
                 "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {
-                            "content": metadata.get('button_text', 'Visit Link'),
-                            "tag": "plain_text"
-                        },
-                        "url": metadata.get('url'),
-                        "type": "primary"
-                    }
-                ]
+                "actions": _build_action_buttons(metadata),
             },
         ])
 
