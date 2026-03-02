@@ -450,7 +450,7 @@ def _process_message(msg_type, message_id, timestamp_ms, sender_open_id, content
             metadata = fetch_page_metadata(url)
 
             # Skip blocked URLs (SSRF / Lark domains)
-            if metadata.get("title") == "無法預覽":
+            if metadata.get("blocked"):
                 continue
 
             image_url = metadata.get("image_url")

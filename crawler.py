@@ -320,6 +320,7 @@ def fetch_page_metadata(url: str) -> dict:
         logger.warning(f"SSRF blocked: {url}")
         metadata['title'] = "無法預覽"
         metadata['description'] = "此網址無法抓取預覽內容。"
+        metadata['blocked'] = True
         return metadata
 
     headers_list = [
