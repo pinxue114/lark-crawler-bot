@@ -1,13 +1,58 @@
+import ipaddress
 import logging
 import os
 import re
+import socket
 import requests
 from bs4 import BeautifulSoup
-
-logger = logging.getLogger(__name__)
 from urllib.parse import urlparse, unquote, parse_qs
 
+logger = logging.getLogger(__name__)
+
 _session = requests.Session()
+
+
+def _is_public_ip(addr):
+    """Return True if the IP is a public, routable address."""
+    return not (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def _is_safe_url(url: str) -> bool:
+    """Check URL doesn't target private/reserved networks (SSRF protection)."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        # Check if hostname is an IP literal
+        try:
+            addr = ipaddress.ip_address(hostname)
+            return _is_public_ip(addr)
+        except ValueError:
+            pass  # Not an IP literal, resolve DNS
+
+        # Resolve hostname and check all IPs
+        addrs = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        if not addrs:
+            return False
+        for family, _, _, _, sockaddr in addrs:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if not _is_public_ip(ip):
+                return False
+        return True
+    except Exception:
+        return False
+
 
 def extract_urls(text: str) -> list[str]:
     """
@@ -264,6 +309,13 @@ def fetch_page_metadata(url: str) -> dict:
                 del result["image_url"]
 
         return result
+
+    # SSRF protection: block private/reserved IPs for non-Facebook URLs
+    if not _is_safe_url(url):
+        logger.warning(f"SSRF blocked: {url}")
+        metadata['title'] = "Blocked"
+        metadata['description'] = "URL targets a private or reserved network."
+        return metadata
 
     headers_list = [
         {

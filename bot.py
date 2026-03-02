@@ -29,7 +29,7 @@ from lark_oapi.api.bitable.v1 import (
     AppTableRecord
 )
 
-from crawler import extract_urls, fetch_page_metadata
+from crawler import extract_urls, fetch_page_metadata, _is_safe_url
 
 # Event deduplication: Lark may retry delivery if response is slow
 _processed_events = TTLCache(maxsize=10000, ttl=600)  # auto-expire after 10 min
@@ -277,6 +277,9 @@ def upload_to_drive(file_obj, file_name: str) -> str:
 
 def download_image_from_url(url: str) -> tuple:
     """Download image from external URL. Returns (BytesIO, filename)."""
+    if not _is_safe_url(url):
+        logger.warning(f"SSRF blocked in image download: {url}")
+        return None, None
     try:
         resp = requests.get(url, timeout=15, headers={
             "User-Agent": "facebookexternalhit/1.1"
