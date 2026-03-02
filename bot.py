@@ -124,7 +124,7 @@ def _build_action_buttons(metadata: dict) -> list:
                 "content": "前往多維表格",
                 "tag": "plain_text"
             },
-            "url": f"https://feishu.cn/base/{BITABLE_APP_TOKEN}",
+            "url": "https://blokcert.sg.larksuite.com/wiki/SczhwJ9szixHjxkg6BxlPkZ3g9E?table=tbluyUNStUuhdj8D&view=vewOJbQI26",
             "type": "default"
         })
     return buttons
