@@ -2,7 +2,7 @@ import os
 import re
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, parse_qs
 
 def extract_urls(text: str) -> list[str]:
     """
@@ -124,11 +124,6 @@ def _fetch_facebook_direct(url: str) -> dict | None:
         return None
 
 
-def _fetch_facebook_via_api(url: str) -> dict | None:
-    """Try metadata APIs for Facebook URLs. Returns first meaningful result or None."""
-    return _fetch_facebook_via_microlink(url)
-
-
 
 def _fetch_facebook_via_proxy(url: str) -> dict | None:
     """Fallback: fetch Facebook metadata via Cloudflare Worker proxy."""
@@ -158,7 +153,6 @@ def _fetch_facebook_via_proxy(url: str) -> dict | None:
         if _is_generic_facebook_metadata(title, description):
             if image_url:
                 # Extract media_id from lookaside URL or fbid from original URL
-                from urllib.parse import parse_qs
                 media_id = parse_qs(urlparse(image_url).query).get("media_id", [None])[0]
                 if not media_id:
                     media_id = parse_qs(urlparse(url).query).get("fbid", [None])[0]
@@ -239,7 +233,7 @@ def fetch_page_metadata(url: str) -> dict:
 
     # Facebook URLs: try Microlink API → direct crawl → proxy → URL structure fallback
     if _is_facebook_url(url):
-        api_result = _fetch_facebook_via_api(url)
+        api_result = _fetch_facebook_via_microlink(url)
         if api_result is not None:
             result = api_result
         else:
