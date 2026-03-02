@@ -4,6 +4,7 @@ import json
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from cachetools import TTLCache
 from urllib.parse import urlparse
 
 import requests
@@ -30,7 +31,7 @@ from lark_oapi.api.bitable.v1 import (
 from crawler import extract_urls, fetch_page_metadata
 
 # Event deduplication: Lark may retry delivery if response is slow
-_processed_events = set()
+_processed_events = TTLCache(maxsize=10000, ttl=600)  # auto-expire after 10 min
 _event_lock = threading.Lock()          # Atomic check-then-add for dedup
 _executor = ThreadPoolExecutor(max_workers=4)  # Background processing pool
 _bot_start_time = int(time.time())
@@ -262,7 +263,7 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         if event_id in _processed_events:
             print(f"Skipping duplicate event: {event_id}")
             return
-        _processed_events.add(event_id)
+        _processed_events[event_id] = True
 
     msg_type = data.event.message.message_type
     message_id = data.event.message.message_id
